@@ -1,3 +1,13 @@
 .venv/
 __pycache__/
 *.pyc
+data/
+*.db
+*.db-shm
+*.db-wal
+.env
+.openclaw-home/
+.openclaw-gateway*.log
+tests/.tmp/
+tests/.tmp-debug/
+tests/__pycache__/

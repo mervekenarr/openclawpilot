@@ -4,11 +4,17 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.api.ai_routes import router as ai_router
 from app.api.crawl_routes import router as crawl_router
 from app.api.keyword_routes import router as keyword_router
 from app.api.lead_routes import router as lead_router
 from app.api.pipeline_routes import router as pipeline_router
+from app.api.system_routes import router as system_router
+from app.env_loader import load_env_file
+from app import store
 
+
+load_env_file()
 
 app = FastAPI(
     title="OpenClaw Pilot API",
@@ -21,9 +27,16 @@ ui_dir = base_dir / "ui"
 
 app.include_router(keyword_router)
 app.include_router(crawl_router)
+app.include_router(ai_router)
 app.include_router(lead_router)
 app.include_router(pipeline_router)
+app.include_router(system_router)
 app.mount("/dashboard-assets", StaticFiles(directory=ui_dir), name="dashboard-assets")
+
+
+@app.on_event("startup")
+def on_startup():
+    store.init_db()
 
 
 @app.get("/")

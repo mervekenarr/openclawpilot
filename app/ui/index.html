@@ -10,97 +10,219 @@
     <div class="page-shell">
         <header class="hero">
             <div class="hero-copy">
-                <p class="eyebrow">OpenClaw Pilot / Mock Dashboard</p>
-                <h1>Satis akisini gorunur hale getiren demo panel</h1>
-                <p class="subtitle">
-                    Arastirma, review, CRM ve outreach adimlarini dis entegrasyon olmadan
-                    tek ekrandan takip etmek icin hazirlandi.
-                </p>
+                <h1>OpenClaw Pilot</h1>
             </div>
             <div class="hero-actions">
-                <a class="ghost-link" href="/docs" target="_blank" rel="noreferrer">API docs</a>
+                <a class="ghost-link" href="/docs" target="_blank" rel="noreferrer">API</a>
                 <button id="refreshButton" class="secondary-button" type="button">Veriyi yenile</button>
             </div>
         </header>
 
-        <section class="panel intake-panel">
-            <div class="section-head">
-                <div>
-                    <p class="section-kicker">Yeni tarama</p>
-                    <h2>Keyword ve sektor gir</h2>
-                </div>
-                <p class="section-note">Bu alan sadece mock lead uretir. Gercek web veya LinkedIn taramasi yapmaz.</p>
-            </div>
-
-            <form id="intakeForm" class="intake-grid">
-                <label>
-                    <span>Keyword</span>
-                    <input id="keywordInput" name="keyword" type="text" placeholder="metal dokum" required>
-                </label>
-                <label>
-                    <span>Sektor</span>
-                    <input id="sectorInput" name="sector" type="text" placeholder="metal">
-                </label>
-                <label>
-                    <span>Lead limiti</span>
-                    <input id="limitInput" name="limit" type="number" min="1" max="10" value="5" required>
-                </label>
-                <button class="primary-button" type="submit">Keyword kaydet ve crawl baslat</button>
-            </form>
-
-            <div id="statusBanner" class="status-banner status-idle">
-                Dashboard hazir.
-            </div>
-        </section>
-
-        <section class="panel keyword-panel">
-            <div class="section-head">
-                <div>
-                    <p class="section-kicker">Aktif veri</p>
-                    <h2>Kayitli keywordler</h2>
-                </div>
-            </div>
-            <div id="keywordRail" class="keyword-rail"></div>
-        </section>
-
-        <section id="summaryGrid" class="summary-grid"></section>
-
-        <section class="content-grid">
-            <article class="panel">
-                <div class="section-head">
+        <section class="top-grid">
+            <section class="panel intake-panel panel-tight">
+                <div class="section-head section-head-tight">
                     <div>
-                        <p class="section-kicker">Arastirma havuzu</p>
-                        <h2>Raw leads</h2>
+                        <h2>Yeni tarama</h2>
                     </div>
-                    <p class="section-note">Research ve review aksiyonlari burada ilerler.</p>
                 </div>
-                <div id="rawLeadList" class="card-list"></div>
+
+                <form id="intakeForm" class="intake-grid">
+                    <label>
+                        <span>Anahtar kelime</span>
+                        <input id="keywordInput" name="keyword" type="text" placeholder="metal dokum" required>
+                    </label>
+                    <label>
+                        <span>Sektor</span>
+                        <input id="sectorInput" name="sector" type="text" placeholder="metal">
+                    </label>
+                    <label>
+                        <span>Lead limiti</span>
+                        <input id="limitInput" name="limit" type="number" min="1" max="10" value="5" required>
+                    </label>
+                    <button class="primary-button" type="submit">Crawl baslat</button>
+                </form>
+
+                <div id="statusBanner" class="status-banner status-idle">
+                    Dashboard hazir.
+                </div>
+            </section>
+
+            <div class="side-stack">
+                <section class="panel keyword-panel panel-tight">
+                    <div class="section-head section-head-tight">
+                        <div>
+                            <h2>Anahtar kelimeler</h2>
+                        </div>
+                    </div>
+                    <div id="keywordRail" class="keyword-rail"></div>
+                </section>
+
+                <section class="panel system-panel panel-tight">
+                    <div class="section-head section-head-tight">
+                        <div>
+                            <h2>Sistem</h2>
+                        </div>
+                    </div>
+                    <div id="systemPanel" class="system-grid"></div>
+                </section>
+            </div>
+        </section>
+
+        <section class="workspace-grid">
+            <article class="panel raw-panel">
+                <div class="section-head section-head-tight">
+                    <div>
+                        <h2>Ham leadler</h2>
+                    </div>
+                    <label class="filter-field filter-search quick-search-field">
+                        <span>Arama</span>
+                        <input id="rawSearchFilter" type="text" placeholder="firma veya anahtar kelime ara">
+                    </label>
+                </div>
+
+                <div class="quick-filter-row">
+                    <label class="filter-field compact-filter">
+                        <span>Durum</span>
+                        <select id="rawStatusFilter">
+                            <option value="">hepsi</option>
+                            <option value="new">new</option>
+                            <option value="needs_review">needs_review</option>
+                            <option value="approved">approved</option>
+                            <option value="on_hold">on_hold</option>
+                            <option value="needs_revision">needs_revision</option>
+                            <option value="rejected">rejected</option>
+                        </select>
+                    </label>
+
+                    <details class="simple-toggle mini-toggle">
+                        <summary>Daha fazla filtre</summary>
+                        <div class="filter-row compact-filter-row">
+                            <label class="filter-field compact-filter">
+                                <span>Arastirma</span>
+                                <select id="rawResearchStatusFilter">
+                                    <option value="">hepsi</option>
+                                    <option value="pending">bekliyor</option>
+                                    <option value="completed">tamamlandi</option>
+                                </select>
+                            </label>
+                            <label class="filter-field compact-filter">
+                                <span>Oncelik</span>
+                                <select id="rawPriorityFilter">
+                                    <option value="">hepsi</option>
+                                    <option value="high">yuksek</option>
+                                    <option value="medium">orta</option>
+                                    <option value="low">dusuk</option>
+                                </select>
+                            </label>
+                            <label class="filter-field compact-filter">
+                                <span>Guvenilirlik</span>
+                                <select id="rawReliabilityFilter">
+                                    <option value="">hepsi</option>
+                                    <option value="high">high</option>
+                                    <option value="medium">medium</option>
+                                    <option value="low">low</option>
+                                </select>
+                            </label>
+                        </div>
+                    </details>
+                </div>
+
+                <div id="rawLeadList" class="card-list list-scroll"></div>
             </article>
 
-            <article class="panel">
-                <div class="section-head">
+            <section class="panel detail-panel">
+                <div class="section-head section-head-tight">
                     <div>
-                        <p class="section-kicker">Satis hazirlik</p>
-                        <h2>Approved leads</h2>
+                        <h2>Detay</h2>
                     </div>
-                    <p class="section-note">CRM, taslak mesaj ve reply dongusu burada ilerler.</p>
                 </div>
-                <div id="leadList" class="card-list"></div>
-            </article>
+                <div id="detailPanel" class="detail-empty">
+                    Soldan bir kayit sec.
+                </div>
+            </section>
         </section>
 
-        <section class="panel detail-panel">
-            <div class="section-head">
+        <details class="panel simple-toggle lead-toggle">
+            <summary>Leadler</summary>
+            <div class="section-head section-head-tight">
                 <div>
-                    <p class="section-kicker">Detay paneli</p>
-                    <h2>Secilen kayit</h2>
+                    <h2>Onayli leadler</h2>
                 </div>
-                <p class="section-note">Kartlara tiklayarak summary, mesaj ve activity log detayini gor.</p>
+                <label class="filter-field filter-search quick-search-field">
+                    <span>Arama</span>
+                    <input id="leadSearchFilter" type="text" placeholder="sorumlu veya mesaj ara">
+                </label>
             </div>
-            <div id="detailPanel" class="detail-empty">
-                Henuz bir kayit secilmedi.
+
+            <div class="quick-filter-row">
+                <label class="filter-field compact-filter">
+                    <span>Durum</span>
+                    <select id="leadStatusFilter">
+                        <option value="">hepsi</option>
+                        <option value="approved">onayli</option>
+                        <option value="sales_ready">satisa hazir</option>
+                        <option value="draft_ready">taslak hazir</option>
+                        <option value="ready_to_send">gonderime hazir</option>
+                        <option value="awaiting_reply">yanit bekleniyor</option>
+                        <option value="follow_up_draft_ready">takip taslagi hazir</option>
+                        <option value="follow_up_sent">takip gonderildi</option>
+                        <option value="reply_received">yanit alindi</option>
+                        <option value="meeting_requested">toplanti istendi</option>
+                        <option value="follow_up_due">takip zamani</option>
+                        <option value="closed_negative">olumsuz kapandi</option>
+                    </select>
+                </label>
+
+                <details class="simple-toggle mini-toggle">
+                    <summary>Daha fazla filtre</summary>
+                    <div class="filter-row compact-filter-row">
+                        <label class="filter-field compact-filter">
+                            <span>CRM</span>
+                            <select id="leadCrmStatusFilter">
+                                <option value="">hepsi</option>
+                                <option value="pending">bekliyor</option>
+                                <option value="synced">aktarildi</option>
+                                <option value="reply_received">yanit alindi</option>
+                                <option value="meeting_requested">toplanti istendi</option>
+                                <option value="follow_up_due">takip zamani</option>
+                                <option value="closed_negative">olumsuz kapandi</option>
+                            </select>
+                        </label>
+                        <label class="filter-field compact-filter">
+                            <span>Iletisim</span>
+                            <select id="leadOutreachStatusFilter">
+                                <option value="">hepsi</option>
+                                <option value="not_started">baslamadi</option>
+                                <option value="draft_ready">taslak hazir</option>
+                                <option value="approved_to_send">gonderime onayli</option>
+                                <option value="awaiting_reply">yanit bekleniyor</option>
+                                <option value="follow_up_draft_ready">takip taslagi hazir</option>
+                                <option value="follow_up_sent">takip gonderildi</option>
+                                <option value="reply_received">yanit alindi</option>
+                                <option value="meeting_requested">toplanti istendi</option>
+                                <option value="follow_up_due">takip zamani</option>
+                                <option value="closed_negative">olumsuz kapandi</option>
+                            </select>
+                        </label>
+                        <label class="filter-field compact-filter">
+                            <span>Oncelik</span>
+                            <select id="leadPriorityFilter">
+                                <option value="">hepsi</option>
+                                <option value="high">yuksek</option>
+                                <option value="medium">orta</option>
+                                <option value="low">dusuk</option>
+                            </select>
+                        </label>
+                        <label class="filter-field compact-filter">
+                            <span>Sorumlu</span>
+                            <input id="leadOwnerFilter" type="text" placeholder="sorumlu ara">
+                        </label>
+                    </div>
+                </details>
             </div>
-        </section>
+
+            <div id="leadList" class="card-list"></div>
+        </details>
     </div>
 
     <script src="/dashboard-assets/app.js" defer></script>
