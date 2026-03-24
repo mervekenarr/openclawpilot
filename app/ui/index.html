@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenClaw Pilot Dashboard</title>
+    <link rel="stylesheet" href="/dashboard-assets/styles.css">
+</head>
+<body>
+    <div class="page-shell">
+        <header class="hero">
+            <div class="hero-copy">
+                <p class="eyebrow">OpenClaw Pilot / Mock Dashboard</p>
+                <h1>Satis akisini gorunur hale getiren demo panel</h1>
+                <p class="subtitle">
+                    Arastirma, review, CRM ve outreach adimlarini dis entegrasyon olmadan
+                    tek ekrandan takip etmek icin hazirlandi.
+                </p>
+            </div>
+            <div class="hero-actions">
+                <a class="ghost-link" href="/docs" target="_blank" rel="noreferrer">API docs</a>
+                <button id="refreshButton" class="secondary-button" type="button">Veriyi yenile</button>
+            </div>
+        </header>
+
+        <section class="panel intake-panel">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Yeni tarama</p>
+                    <h2>Keyword ve sektor gir</h2>
+                </div>
+                <p class="section-note">Bu alan sadece mock lead uretir. Gercek web veya LinkedIn taramasi yapmaz.</p>
+            </div>
+
+            <form id="intakeForm" class="intake-grid">
+                <label>
+                    <span>Keyword</span>
+                    <input id="keywordInput" name="keyword" type="text" placeholder="metal dokum" required>
+                </label>
+                <label>
+                    <span>Sektor</span>
+                    <input id="sectorInput" name="sector" type="text" placeholder="metal">
+                </label>
+                <label>
+                    <span>Lead limiti</span>
+                    <input id="limitInput" name="limit" type="number" min="1" max="10" value="5" required>
+                </label>
+                <button class="primary-button" type="submit">Keyword kaydet ve crawl baslat</button>
+            </form>
+
+            <div id="statusBanner" class="status-banner status-idle">
+                Dashboard hazir.
+            </div>
+        </section>
+
+        <section class="panel keyword-panel">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Aktif veri</p>
+                    <h2>Kayitli keywordler</h2>
+                </div>
+            </div>
+            <div id="keywordRail" class="keyword-rail"></div>
+        </section>
+
+        <section id="summaryGrid" class="summary-grid"></section>
+
+        <section class="content-grid">
+            <article class="panel">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Arastirma havuzu</p>
+                        <h2>Raw leads</h2>
+                    </div>
+                    <p class="section-note">Research ve review aksiyonlari burada ilerler.</p>
+                </div>
+                <div id="rawLeadList" class="card-list"></div>
+            </article>
+
+            <article class="panel">
+                <div class="section-head">
+                    <div>
+                        <p class="section-kicker">Satis hazirlik</p>
+                        <h2>Approved leads</h2>
+                    </div>
+                    <p class="section-note">CRM, taslak mesaj ve reply dongusu burada ilerler.</p>
+                </div>
+                <div id="leadList" class="card-list"></div>
+            </article>
+        </section>
+
+        <section class="panel detail-panel">
+            <div class="section-head">
+                <div>
+                    <p class="section-kicker">Detay paneli</p>
+                    <h2>Secilen kayit</h2>
+                </div>
+                <p class="section-note">Kartlara tiklayarak summary, mesaj ve activity log detayini gor.</p>
+            </div>
+            <div id="detailPanel" class="detail-empty">
+                Henuz bir kayit secilmedi.
+            </div>
+        </section>
+    </div>
+
+    <script src="/dashboard-assets/app.js" defer></script>
+</body>
+</html>
