@@ -9,6 +9,13 @@ class CrawlRequest(BaseModel):
     limit: int = Field(default=5, ge=1, le=10)
 
 
+class ManualRawLeadCreateRequest(BaseModel):
+    keyword: str = Field(min_length=2, max_length=80)
+    company_name: str = Field(min_length=2, max_length=120)
+    website: str | None = Field(default=None, max_length=200)
+    sector: str | None = Field(default=None, max_length=80)
+
+
 class LeadReviewRequest(BaseModel):
     action: Literal["approve", "reject", "hold", "revise"]
     reviewer_note: str | None = Field(default=None, max_length=300)

@@ -52,7 +52,8 @@ def init_db() -> None:
                 data_reliability TEXT,
                 decision_maker_json TEXT,
                 missing_fields_json TEXT,
-                personal_notes_json TEXT
+                personal_notes_json TEXT,
+                research_bundle_json TEXT
             );
 
             CREATE TABLE IF NOT EXISTS leads (
@@ -99,8 +100,23 @@ def init_db() -> None:
                 request_payload_json TEXT NOT NULL,
                 response_payload_json TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS research_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                raw_lead_id INTEGER NOT NULL,
+                actor_name TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                completed_at TEXT,
+                request_payload_json TEXT NOT NULL,
+                result_payload_json TEXT,
+                error_message TEXT,
+                FOREIGN KEY(raw_lead_id) REFERENCES raw_leads(id)
+            );
             """
         )
+        _ensure_column_exists(connection, "raw_leads", "research_bundle_json", "TEXT")
 
     _initialized = True
 
@@ -202,9 +218,10 @@ def create_raw_lead(record: dict) -> dict:
                 data_reliability,
                 decision_maker_json,
                 missing_fields_json,
-                personal_notes_json
+                personal_notes_json,
+                research_bundle_json
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             _raw_lead_values(record),
         )
@@ -271,7 +288,8 @@ def save_raw_lead(record: dict) -> dict:
                 data_reliability = ?,
                 decision_maker_json = ?,
                 missing_fields_json = ?,
-                personal_notes_json = ?
+                personal_notes_json = ?,
+                research_bundle_json = ?
             WHERE id = ?
             """,
             _raw_lead_values(record) + (record["id"],),
@@ -282,6 +300,50 @@ def save_raw_lead(record: dict) -> dict:
         ).fetchone()
 
     return _raw_lead_from_row(row)
+
+
+def create_research_run(record: dict) -> dict:
+    with connection_scope() as connection:
+        cursor = connection.execute(
+            """
+            INSERT INTO research_runs (
+                raw_lead_id,
+                actor_name,
+                mode,
+                status,
+                created_at,
+                completed_at,
+                request_payload_json,
+                result_payload_json,
+                error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            _research_run_values(record),
+        )
+        research_run_id = cursor.lastrowid
+        row = connection.execute(
+            "SELECT * FROM research_runs WHERE id = ?",
+            (research_run_id,),
+        ).fetchone()
+
+    return _research_run_from_row(row)
+
+
+def list_research_runs(raw_lead_id: int | None = None) -> list[dict]:
+    query = "SELECT * FROM research_runs"
+    params: tuple = ()
+
+    if raw_lead_id is not None:
+        query += " WHERE raw_lead_id = ?"
+        params = (raw_lead_id,)
+
+    query += " ORDER BY id DESC"
+
+    with connection_scope() as connection:
+        rows = connection.execute(query, params).fetchall()
+
+    return [_research_run_from_row(row) for row in rows]
 
 
 def create_lead(record: dict) -> dict:
@@ -558,6 +620,7 @@ def _raw_lead_values(record: dict) -> tuple:
         _json_dumps(record.get("decision_maker")),
         _json_dumps(record.get("missing_fields", [])),
         _json_dumps(record.get("personal_notes", [])),
+        _json_dumps(record.get("research_bundle")),
     )
 
 
@@ -607,6 +670,20 @@ def _ai_draft_values(record: dict) -> tuple:
     )
 
 
+def _research_run_values(record: dict) -> tuple:
+    return (
+        record["raw_lead_id"],
+        record["actor_name"],
+        record["mode"],
+        record["status"],
+        record["created_at"],
+        record.get("completed_at"),
+        _json_dumps(record.get("request_payload", {})),
+        _json_dumps(record.get("result_payload")),
+        record.get("error_message"),
+    )
+
+
 def _raw_lead_from_row(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -631,6 +708,7 @@ def _raw_lead_from_row(row: sqlite3.Row) -> dict:
         "decision_maker": _json_loads(row["decision_maker_json"], {}),
         "missing_fields": _json_loads(row["missing_fields_json"], []),
         "personal_notes": _json_loads(row["personal_notes_json"], []),
+        "research_bundle": _json_loads(row["research_bundle_json"], None),
     }
 
 
@@ -682,6 +760,21 @@ def _ai_draft_from_row(row: sqlite3.Row) -> dict:
     }
 
 
+def _research_run_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "raw_lead_id": row["raw_lead_id"],
+        "actor_name": row["actor_name"],
+        "mode": row["mode"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "completed_at": row["completed_at"],
+        "request_payload": _json_loads(row["request_payload_json"], {}),
+        "result_payload": _json_loads(row["result_payload_json"], None),
+        "error_message": row["error_message"],
+    }
+
+
 def _counter_from_query(connection: sqlite3.Connection, table_name: str, column_name: str) -> dict:
     rows = connection.execute(
         f"""
@@ -697,6 +790,22 @@ def _counter_from_query(connection: sqlite3.Connection, table_name: str, column_
         for row in rows
         if row["label"] is not None
     }
+
+
+def _ensure_column_exists(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    existing_columns = {row[1] for row in rows}
+    if column_name in existing_columns:
+        return
+
+    connection.execute(
+        f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}"
+    )
 
 
 def _json_dumps(value):

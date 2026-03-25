@@ -141,6 +141,24 @@ def save_raw_lead(record: dict) -> dict:
     return backend.save_raw_lead(record)
 
 
+def create_research_run(record: dict) -> dict:
+    backend_name, backend = _get_backend()
+
+    if backend_name == "postgres":
+        return backend.create_research_run(_database_url, record)
+
+    return backend.create_research_run(record)
+
+
+def list_research_runs(raw_lead_id: int | None = None) -> list[dict]:
+    backend_name, backend = _get_backend()
+
+    if backend_name == "postgres":
+        return backend.list_research_runs(_database_url, raw_lead_id=raw_lead_id)
+
+    return backend.list_research_runs(raw_lead_id=raw_lead_id)
+
+
 def create_ai_draft(record: dict) -> dict:
     backend_name, backend = _get_backend()
 

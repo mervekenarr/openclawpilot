@@ -8,6 +8,8 @@ data/
 .env
 .openclaw-home/
 .openclaw-gateway*.log
+ops/openclaw/home/
+ops/openclaw/workspace/
 tests/.tmp/
 tests/.tmp-debug/
 tests/__pycache__/

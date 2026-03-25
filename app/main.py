@@ -19,7 +19,7 @@ load_env_file()
 app = FastAPI(
     title="OpenClaw Pilot API",
     version="0.2.0",
-    description="Mock sales pilot with research, review, outreach, and CRM steps.",
+    description="Sales pilot with safe web research, review, outreach, and CRM steps.",
 )
 
 base_dir = Path(__file__).resolve().parent

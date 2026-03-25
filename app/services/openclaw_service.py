@@ -1,6 +1,22 @@
+import os
 from copy import deepcopy
 
 from app import store
+from app.adapters.company_discovery_client import (
+    CompanyDiscoveryError,
+    discover_company_candidates,
+    discover_company_website,
+)
+from app.services.openclaw_research_service import (
+    OpenClawResearchError,
+    build_openclaw_guided_research_result,
+    openclaw_guided_research_enabled,
+)
+from app.services.openclaw_discovery_service import (
+    build_openclaw_guided_candidates,
+    openclaw_guided_discovery_enabled,
+)
+from app.services.research_service import build_research_result
 
 
 COMPANY_ROOTS = [
@@ -87,7 +103,6 @@ TERMINAL_LEAD_STATUSES = {
     "closed_negative",
 }
 
-
 class WorkflowValidationError(ValueError):
     pass
 
@@ -120,6 +135,22 @@ def _normalize_owner(owner: str | None) -> str | None:
 
     normalized = owner.strip()
     return normalized or None
+
+
+def _get_env_flag(name: str, default: bool = False) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_website(website: str) -> str:
+    normalized = website.strip()
+    if normalized.startswith(("http://", "https://")):
+        return normalized
+
+    return f"https://{normalized}"
 
 
 def _ensure_lead_is_not_terminal(lead: dict) -> None:
@@ -246,6 +277,10 @@ def add_raw_lead_note(raw_lead: dict, note: str) -> dict:
     return store.save_raw_lead(raw_lead)
 
 
+def list_research_runs(raw_lead_id: int) -> list[dict]:
+    return store.list_research_runs(raw_lead_id=raw_lead_id)
+
+
 def update_lead(lead: dict, updates: dict) -> dict:
     editable_fields = [
         "sales_owner",
@@ -298,7 +333,22 @@ def build_raw_lead_timeline(raw_lead: dict) -> list[dict]:
         }
     ]
 
-    if raw_lead.get("research_status") == "completed":
+    research_runs = list_research_runs(raw_lead["id"])
+    if research_runs:
+        for run in research_runs:
+            note = {
+                "completed": f"Arastirma kaydi tamamlandi. Mod: {run.get('mode') or 'bilinmiyor'}.",
+                "reused": f"Mevcut arastirma sonucu tekrar kullanildi. Mod: {run.get('mode') or 'bilinmiyor'}.",
+                "failed": f"Arastirma denemesi basarisiz oldu. {run.get('error_message') or ''}".strip(),
+            }.get(run.get("status"), f"Arastirma kaydi: {run.get('status') or 'bilinmiyor'}")
+            entries.append(
+                {
+                    "type": "research_run",
+                    "note": note,
+                    "at": run.get("completed_at") or run.get("created_at") or raw_lead["created_at"],
+                }
+            )
+    elif raw_lead.get("research_status") == "completed":
         entries.append(
             {
                 "type": "research_completed",
@@ -381,6 +431,7 @@ def generate_raw_leads(keyword: str, sector: str | None, limit: int) -> list[dic
             "decision_maker": None,
             "missing_fields": [],
             "personal_notes": [],
+            "research_bundle": None,
         }
 
         generated_leads.append(store.create_raw_lead(lead))
@@ -388,51 +439,110 @@ def generate_raw_leads(keyword: str, sector: str | None, limit: int) -> list[dic
     return generated_leads
 
 
-def build_mock_enrichment_result(raw_lead: dict) -> dict:
-    seed = raw_lead["id"] + len(raw_lead["company_name"]) + len(raw_lead["keyword"])
-    contact_name = f"{_pick(FIRST_NAMES, seed)} {_pick(LAST_NAMES, seed + 2)}"
-    email_local = contact_name.lower().replace(" ", ".")
-    company_slug = _slugify(raw_lead["company_name"])
+def discover_raw_leads(keyword: str, sector: str | None, limit: int) -> list[dict]:
+    normalized_sector = sector or keyword.title()
+    if openclaw_guided_discovery_enabled():
+        candidates = build_openclaw_guided_candidates(
+            keyword=keyword,
+            sector=normalized_sector,
+            limit=limit,
+        )
+    else:
+        candidates = discover_company_candidates(keyword=keyword, sector=normalized_sector, limit=limit)
+    created_records = []
+    current_at = store.utc_now()
 
-    decision_maker = {
-        "name": contact_name,
-        "title": _pick(ROLE_TITLES, seed + 1),
-        "email": f"{email_local}@{company_slug}.com",
-        "linkedin_hint": f"https://linkedin.com/in/{email_local}",
-    }
+    for candidate in candidates:
+        website = _normalize_website(candidate["website"])
+        existing = _find_existing_raw_lead(keyword=keyword, company_name=candidate["company_name"], website=website)
+        if existing:
+            created_records.append(existing)
+            continue
 
-    missing_fields = []
-    if raw_lead["id"] % 3 == 0:
-        decision_maker["email"] = None
-        missing_fields.append("contact_email")
-    if raw_lead["id"] % 4 == 0:
-        decision_maker["linkedin_hint"] = None
-        missing_fields.append("linkedin_profile")
-    if raw_lead["id"] % 5 == 0:
-        decision_maker["name"] = None
-        missing_fields.append("decision_maker_name")
+        lead = {
+            "keyword": keyword,
+            "sector": normalized_sector,
+            "company_name": candidate["company_name"],
+            "website": website,
+            "source": candidate.get("source", "web_discovery"),
+            "status": "new",
+            "research_status": "pending",
+            "created_at": current_at,
+            "updated_at": None,
+            "reviewed_at": None,
+            "review_note": None,
+            "company_summary": None,
+            "recent_signal": None,
+            "fit_reason": None,
+            "summary": None,
+            "priority": None,
+            "confidence": None,
+            "data_reliability": None,
+            "decision_maker": None,
+            "missing_fields": [],
+            "personal_notes": [
+                (
+                    f"[{current_at}] Kaynak: OpenClaw yonlendirmeli guvenli web aramasi"
+                    if str(candidate.get('source', '')).startswith("openclaw")
+                    else f"[{current_at}] Kaynak: guvenli web aramasi"
+                ),
+                *([f"[{current_at}] Arama sorgusu: {candidate['query']}"] if candidate.get("query") else []),
+                *([f"[{current_at}] Arama basligi: {candidate['title']}"] if candidate.get("title") else []),
+                *([f"[{current_at}] Arama ozeti: {candidate['snippet']}"] if candidate.get("snippet") else []),
+                *([f"[{current_at}] OpenClaw secim nedeni: {candidate['selection_reason']}"] if candidate.get("selection_reason") else []),
+                *([f"[{current_at}] OpenClaw guveni: {candidate['selection_confidence']}"] if candidate.get("selection_confidence") else []),
+            ],
+            "research_bundle": None,
+        }
+        created_records.append(store.create_raw_lead(lead))
 
-    quality = _quality_from_missing(missing_fields)
-    confidence = "high" if quality == "high" else "medium" if quality == "medium" else "low"
-    priority = "high" if quality == "high" else "medium" if quality == "medium" else "low"
+    return created_records
 
-    return {
-        "decision_maker": decision_maker,
-        "company_summary": (
-            f"{raw_lead['company_name']} {raw_lead['sector']} alaninda aktif gorunen bir firma."
-        ),
-        "recent_signal": _pick(RECENT_SIGNALS, seed + 3),
-        "fit_reason": _pick(FIT_REASONS, seed + 4),
-        "summary": _pick(SUMMARIES, seed + 5),
-        "priority": priority,
-        "confidence": confidence,
-        "data_reliability": quality,
-        "missing_fields": missing_fields,
-        "source_notes": [
-            f"{raw_lead['sector']} keyword seti ile uyumlu bulundu.",
-            "Ilk temas oncesi insan onayi beklenmeli.",
+
+def create_manual_raw_lead(
+    keyword: str,
+    company_name: str,
+    website: str | None,
+    sector: str | None = None,
+) -> dict:
+    normalized_sector = sector or keyword.title()
+    current_at = store.utc_now()
+    resolved_website = website.strip() if website else ""
+
+    if not resolved_website:
+        if _get_env_flag("SAFE_SITE_DISCOVERY_ENABLED", True):
+            resolved_website = discover_company_website(company_name)
+        else:
+            raise CompanyDiscoveryError("Website girilmedi ve otomatik site bulma kapali.")
+
+    lead = {
+        "keyword": keyword,
+        "sector": normalized_sector,
+        "company_name": company_name.strip(),
+        "website": _normalize_website(resolved_website),
+        "source": "manual_input",
+        "status": "new",
+        "research_status": "pending",
+        "created_at": current_at,
+        "updated_at": None,
+        "reviewed_at": None,
+        "review_note": None,
+        "company_summary": None,
+        "recent_signal": None,
+        "fit_reason": None,
+        "summary": None,
+        "priority": None,
+        "confidence": None,
+        "data_reliability": None,
+        "decision_maker": None,
+        "missing_fields": [],
+        "personal_notes": [
+            f"[{current_at}] Kaynak: manuel firma girisi",
+            *([f"[{current_at}] Website otomatik bulundu: {resolved_website}"] if not website else []),
         ],
+        "research_bundle": None,
     }
+    return store.create_raw_lead(lead)
 
 
 def apply_enrichment_result(
@@ -461,6 +571,7 @@ def apply_enrichment_result(
             "data_reliability": enrichment.get("data_reliability"),
             "missing_fields": deepcopy(enrichment.get("missing_fields", [])),
             "personal_notes": existing_notes + source_notes,
+            "research_bundle": deepcopy(enrichment.get("research_bundle")),
             "updated_at": current_at,
         }
     )
@@ -468,13 +579,56 @@ def apply_enrichment_result(
     return store.save_raw_lead(raw_lead)
 
 
-def enrich_lead(raw_lead: dict) -> dict:
-    enrichment = build_mock_enrichment_result(raw_lead)
-    return apply_enrichment_result(
+def enrich_lead(raw_lead: dict, actor_name: str = "panel") -> dict:
+    if raw_lead.get("research_status") == "completed" and raw_lead.get("research_bundle"):
+        _record_research_run(
+            raw_lead=raw_lead,
+            actor_name=actor_name,
+            mode=(raw_lead.get("research_bundle") or {}).get("mode", "existing_bundle"),
+            status="reused",
+            result_payload=_build_research_run_payload(raw_lead, raw_lead.get("research_bundle")),
+        )
+        return raw_lead
+
+    try:
+        enrichment = (
+            build_openclaw_guided_research_result(raw_lead)
+            if openclaw_guided_research_enabled()
+            else build_research_result(raw_lead)
+        )
+    except Exception as exc:
+        _record_research_run(
+            raw_lead=raw_lead,
+            actor_name=actor_name,
+            mode=(
+                "openclaw_guided"
+                if openclaw_guided_research_enabled()
+                else "safe_web_first" if _get_env_flag("SAFE_WEB_RESEARCH_ENABLED", False) else "seeded"
+            ),
+            status="failed",
+            error_message=str(exc),
+        )
+        raise
+    applied_note = (
+        "OpenClaw rehberli arastirma sonucu kayda uygulandi."
+        if openclaw_guided_research_enabled()
+        else "Guvenli web arastirmasi sonucu kayda uygulandi."
+        if _get_env_flag("SAFE_WEB_RESEARCH_ENABLED", False)
+        else "Baslangic arastirma sonucu kayda uygulandi."
+    )
+    saved_raw_lead = apply_enrichment_result(
         raw_lead,
         enrichment,
-        applied_note="Mock research sonucu kayda uygulandi.",
+        applied_note=applied_note,
     )
+    _record_research_run(
+        raw_lead=saved_raw_lead,
+        actor_name=actor_name,
+        mode=(enrichment.get("research_bundle") or {}).get("mode", "unknown"),
+        status="completed",
+        result_payload=_build_research_run_payload(saved_raw_lead, enrichment.get("research_bundle")),
+    )
+    return saved_raw_lead
 
 
 def approve_raw_lead(raw_lead: dict, reviewer_note: str | None) -> tuple[dict, dict]:
@@ -706,3 +860,61 @@ def _extract_timestamped_note(note: str) -> tuple[str | None, str]:
         return timestamp, body
 
     return None, note
+
+
+def _find_existing_raw_lead(keyword: str, company_name: str, website: str) -> dict | None:
+    normalized_company = company_name.strip().lower()
+    normalized_website = website.strip().lower()
+
+    for record in store.list_raw_leads(limit=300):
+        if record["keyword"].strip().lower() != keyword.strip().lower():
+            continue
+        if record["company_name"].strip().lower() == normalized_company:
+            return record
+        if record["website"].strip().lower() == normalized_website:
+            return record
+
+    return None
+
+
+def _record_research_run(
+    raw_lead: dict,
+    actor_name: str,
+    mode: str,
+    status: str,
+    result_payload: dict | None = None,
+    error_message: str | None = None,
+) -> dict:
+    current_at = store.utc_now()
+    return store.create_research_run(
+        {
+            "raw_lead_id": raw_lead["id"],
+            "actor_name": actor_name,
+            "mode": mode,
+            "status": status,
+            "created_at": current_at,
+            "completed_at": current_at,
+            "request_payload": {
+                "company_name": raw_lead.get("company_name"),
+                "website": raw_lead.get("website"),
+                "keyword": raw_lead.get("keyword"),
+                "sector": raw_lead.get("sector"),
+                "source": raw_lead.get("source"),
+            },
+            "result_payload": result_payload,
+            "error_message": error_message,
+        }
+    )
+
+
+def _build_research_run_payload(raw_lead: dict, research_bundle: dict | None) -> dict:
+    return {
+        "company_summary": raw_lead.get("company_summary"),
+        "recent_signal": raw_lead.get("recent_signal"),
+        "fit_reason": raw_lead.get("fit_reason"),
+        "summary": raw_lead.get("summary"),
+        "priority": raw_lead.get("priority"),
+        "confidence": raw_lead.get("confidence"),
+        "data_reliability": raw_lead.get("data_reliability"),
+        "research_bundle": deepcopy(research_bundle),
+    }

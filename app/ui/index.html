@@ -1,16 +1,16 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OpenClaw Pilot Dashboard</title>
+    <title>OpenClaw Pilot</title>
     <link rel="stylesheet" href="/dashboard-assets/styles.css">
 </head>
 <body>
     <div class="page-shell">
         <header class="hero">
             <div class="hero-copy">
-                <h1>OpenClaw Pilot</h1>
+                <h1>OpenClaw satis pilotu</h1>
             </div>
             <div class="hero-actions">
                 <a class="ghost-link" href="/docs" target="_blank" rel="noreferrer">API</a>
@@ -22,8 +22,13 @@
             <section class="panel intake-panel panel-tight">
                 <div class="section-head section-head-tight">
                     <div>
-                        <h2>Yeni tarama</h2>
+                        <h2>Firma arama</h2>
                     </div>
+                </div>
+
+                <div class="source-switch" role="tablist" aria-label="Arama kaynagi sec">
+                    <button id="webModeButton" class="source-chip is-active" type="button" data-search-mode="web">Web</button>
+                    <button id="linkedinModeButton" class="source-chip" type="button" data-search-mode="linkedin">LinkedIn</button>
                 </div>
 
                 <form id="intakeForm" class="intake-grid">
@@ -39,19 +44,58 @@
                         <span>Lead limiti</span>
                         <input id="limitInput" name="limit" type="number" min="1" max="10" value="5" required>
                     </label>
-                    <button class="primary-button" type="submit">Crawl baslat</button>
+                    <label id="linkedinRoleField" hidden>
+                        <span>Hedef rol</span>
+                        <input id="linkedinRoleInput" name="linkedin_role" type="text" placeholder="satin alma muduru">
+                    </label>
+                    <div class="mode-actions">
+                        <a id="linkedinOpenLink" class="ghost-link" href="https://www.linkedin.com/login" target="_blank" rel="noreferrer" hidden>LinkedIn giris sayfasini ac</a>
+                        <button id="intakeSubmitButton" class="primary-button" type="submit">Web arama baslat</button>
+                    </div>
                 </form>
+
+                <div id="recentSearchesBox" class="recent-searches-box" hidden></div>
+
+                <div id="linkedinAssistPanel" class="linkedin-assist-panel" hidden>
+                    <p class="linkedin-assist-note">
+                        LinkedIn hesabi bu sisteme girilmez. LinkedIn'i ayri sekmede ac, sistemin verdigi arama cumlesiyle manuel ilerle.
+                    </p>
+                    <div id="linkedinAssistResult" class="linkedin-assist-result"></div>
+                </div>
+
+                <details class="simple-toggle manual-toggle">
+                    <summary>Gercek firma ekle</summary>
+                    <form id="manualLeadForm" class="manual-intake-grid">
+                        <label>
+                            <span>Firma adi</span>
+                            <input name="company_name" type="text" placeholder="Ornek Makina" required>
+                        </label>
+                        <label>
+                            <span>Web sitesi (opsiyonel)</span>
+                            <input name="website" type="text" placeholder="Bos birakirsan sistem bulmayi dener">
+                        </label>
+                        <label>
+                            <span>Anahtar kelime</span>
+                            <input name="keyword" type="text" placeholder="vana" required>
+                        </label>
+                        <label>
+                            <span>Sektor</span>
+                            <input name="sector" type="text" placeholder="metal">
+                        </label>
+                        <button class="secondary-button" type="submit">Firma ekle</button>
+                    </form>
+                </details>
 
                 <div id="statusBanner" class="status-banner status-idle">
                     Dashboard hazir.
                 </div>
             </section>
 
-            <div class="side-stack">
+            <div class="side-stack" hidden>
                 <section class="panel keyword-panel panel-tight">
                     <div class="section-head section-head-tight">
                         <div>
-                            <h2>Anahtar kelimeler</h2>
+                            <h2>Son aramalar</h2>
                         </div>
                     </div>
                     <div id="keywordRail" class="keyword-rail"></div>
@@ -60,7 +104,7 @@
                 <section class="panel system-panel panel-tight">
                     <div class="section-head section-head-tight">
                         <div>
-                            <h2>Sistem</h2>
+                            <h2>Hazirlik</h2>
                         </div>
                     </div>
                     <div id="systemPanel" class="system-grid"></div>
@@ -94,7 +138,7 @@
                         </select>
                     </label>
 
-                    <details class="simple-toggle mini-toggle">
+                    <details class="simple-toggle mini-toggle" hidden>
                         <summary>Daha fazla filtre</summary>
                         <div class="filter-row compact-filter-row">
                             <label class="filter-field compact-filter">
@@ -137,12 +181,12 @@
                     </div>
                 </div>
                 <div id="detailPanel" class="detail-empty">
-                    Soldan bir kayit sec.
+                    Soldan bir firma sec.
                 </div>
             </section>
         </section>
 
-        <details class="panel simple-toggle lead-toggle">
+        <details class="panel simple-toggle lead-toggle" hidden>
             <summary>Leadler</summary>
             <div class="section-head section-head-tight">
                 <div>

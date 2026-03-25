@@ -195,7 +195,7 @@ def build_raw_lead_draft_comparison(base_draft: dict, compare_draft: dict) -> di
 
 
 def build_safe_enrichment_request(raw_lead: dict) -> dict:
-    return {
+    payload = {
         "raw_lead_id": raw_lead["id"],
         "company_name": raw_lead["company_name"],
         "website": raw_lead["website"],
@@ -204,6 +204,26 @@ def build_safe_enrichment_request(raw_lead: dict) -> dict:
         "source": raw_lead["source"],
         "missing_fields": list(raw_lead.get("missing_fields", [])),
     }
+
+    if raw_lead.get("company_summary"):
+        payload["company_summary"] = raw_lead["company_summary"]
+    if raw_lead.get("recent_signal"):
+        payload["recent_signal"] = raw_lead["recent_signal"]
+    if raw_lead.get("fit_reason"):
+        payload["fit_reason"] = raw_lead["fit_reason"]
+
+    public_notes = [
+        note for note in raw_lead.get("personal_notes", [])
+        if isinstance(note, str) and note.startswith("[public-")
+    ]
+    if public_notes:
+        payload["public_research_notes"] = public_notes[:6]
+
+    research_bundle = _sanitize_research_bundle(raw_lead.get("research_bundle"))
+    if research_bundle:
+        payload["research_bundle"] = research_bundle
+
+    return payload
 
 
 def request_raw_lead_enrichment_draft(raw_lead: dict, actor_name: str) -> dict:
@@ -515,4 +535,41 @@ def _build_draft_reference(draft: dict) -> dict:
         "updated_at": draft.get("updated_at"),
         "approved_at": draft.get("approved_at"),
         "approved_by": draft.get("approved_by"),
+    }
+
+
+def _sanitize_research_bundle(research_bundle: dict | None) -> dict | None:
+    if not research_bundle:
+        return None
+
+    sanitized_sources = []
+    for source in research_bundle.get("sources", []):
+        if source.get("status") != "reviewed":
+            continue
+
+        sanitized_sources.append(
+            {
+                "source_id": source.get("source_id"),
+                "label": source.get("label"),
+                "url": source.get("url"),
+                "title": source.get("title"),
+                "snippet": source.get("snippet"),
+                "confidence": source.get("confidence"),
+                "relevance": source.get("relevance"),
+                "published_at": source.get("published_at"),
+            }
+        )
+
+    evidence_summary = research_bundle.get("evidence_summary") or {}
+    return {
+        "mode": research_bundle.get("mode"),
+        "built_at": research_bundle.get("built_at"),
+        "inputs": research_bundle.get("inputs") or {},
+        "evidence_summary": {
+            "source_count": evidence_summary.get("source_count", len(sanitized_sources)),
+            "reviewed_count": evidence_summary.get("reviewed_count", len(sanitized_sources)),
+            "high_confidence_count": evidence_summary.get("high_confidence_count", 0),
+            "news_count": evidence_summary.get("news_count", 0),
+        },
+        "sources": sanitized_sources[:6],
     }

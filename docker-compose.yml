@@ -18,5 +18,41 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
+  openclaw-gateway:
+    profiles: ["openclaw"]
+    image: ${OPENCLAW_DOCKER_IMAGE:-openclaw-local:2026.3.23-2}
+    container_name: openclawpilot-openclaw
+    restart: unless-stopped
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+    environment:
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_GATEWAY_PORT: 18789
+    command: ["gateway", "run"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - openclaw_home:/home/node/.openclaw
+
+  openclaw-cli:
+    profiles: ["openclaw"]
+    image: ${OPENCLAW_DOCKER_IMAGE:-openclaw-local:2026.3.23-2}
+    depends_on:
+      - openclaw-gateway
+    network_mode: "service:openclaw-gateway"
+    entrypoint: ["openclaw"]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - NET_ADMIN
+      - NET_RAW
+    volumes:
+      - openclaw_home:/home/node/.openclaw
+
 volumes:
   postgres_data:
+  openclaw_home:

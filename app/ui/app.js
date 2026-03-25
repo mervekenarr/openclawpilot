@@ -2,10 +2,16 @@ const state = {
     keywords: [],
     rawLeads: [],
     leads: [],
+    recentSearches: [],
     summary: null,
     system: null,
     selected: null,
     actor: loadActorPreferences(),
+    ui: {
+        recentSearchesOpen: false,
+        searchMode: "web",
+        linkedinPlan: null,
+    },
     detail: {
         loading: false,
         error: null,
@@ -51,11 +57,23 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function assignElements() {
     elements.intakeForm = document.getElementById("intakeForm");
+    elements.manualLeadForm = document.getElementById("manualLeadForm");
     elements.refreshButton = document.getElementById("refreshButton");
     elements.statusBanner = document.getElementById("statusBanner");
+    elements.keywordInput = document.getElementById("keywordInput");
+    elements.sectorInput = document.getElementById("sectorInput");
+    elements.webModeButton = document.getElementById("webModeButton");
+    elements.linkedinModeButton = document.getElementById("linkedinModeButton");
+    elements.linkedinRoleField = document.getElementById("linkedinRoleField");
+    elements.linkedinRoleInput = document.getElementById("linkedinRoleInput");
+    elements.linkedinOpenLink = document.getElementById("linkedinOpenLink");
+    elements.linkedinAssistPanel = document.getElementById("linkedinAssistPanel");
+    elements.linkedinAssistResult = document.getElementById("linkedinAssistResult");
+    elements.intakeSubmitButton = document.getElementById("intakeSubmitButton");
     elements.actorRoleSelect = document.getElementById("actorRoleSelect");
     elements.actorNameInput = document.getElementById("actorNameInput");
     elements.keywordRail = document.getElementById("keywordRail");
+    elements.recentSearchesBox = document.getElementById("recentSearchesBox");
     elements.systemPanel = document.getElementById("systemPanel");
     elements.summaryGrid = document.getElementById("summaryGrid");
     elements.rawLeadList = document.getElementById("rawLeadList");
@@ -82,12 +100,33 @@ function assignElements() {
 
 function bindEvents() {
     elements.intakeForm.addEventListener("submit", handleIntakeSubmit);
+    if (elements.manualLeadForm) {
+        elements.manualLeadForm.addEventListener("submit", handleManualLeadSubmit);
+    }
     elements.refreshButton.addEventListener("click", () => refreshDashboard("Veriler yenilendi."));
     elements.rawLeadList.addEventListener("click", handleRawLeadClick);
     elements.leadList.addEventListener("click", handleLeadClick);
     elements.detailPanel.addEventListener("submit", handleDetailSubmit);
     elements.detailPanel.addEventListener("input", handleDetailInput);
     elements.detailPanel.addEventListener("change", handleDetailInput);
+    if (elements.webModeButton) {
+        elements.webModeButton.addEventListener("click", handleSearchModeChange);
+    }
+    if (elements.linkedinModeButton) {
+        elements.linkedinModeButton.addEventListener("click", handleSearchModeChange);
+    }
+    if (elements.keywordInput) {
+        elements.keywordInput.addEventListener("focus", showRecentSearches);
+        elements.keywordInput.addEventListener("click", showRecentSearches);
+    }
+    if (elements.sectorInput) {
+        elements.sectorInput.addEventListener("focus", showRecentSearches);
+        elements.sectorInput.addEventListener("click", showRecentSearches);
+    }
+    if (elements.recentSearchesBox) {
+        elements.recentSearchesBox.addEventListener("click", handleRecentSearchClick);
+    }
+    document.addEventListener("click", handleDocumentClick);
     if (elements.actorRoleSelect) {
         elements.actorRoleSelect.addEventListener("change", handleActorChange);
     }
@@ -139,6 +178,7 @@ async function refreshDashboard(successMessage) {
         state.keywords = keywords;
         state.rawLeads = rawLeads;
         state.leads = leads;
+        state.recentSearches = buildRecentSearches(rawLeads);
         state.summary = summary;
         state.system = system;
 
@@ -198,13 +238,25 @@ async function handleIntakeSubmit(event) {
     const keyword = String(formData.get("keyword") || "").trim();
     const sector = String(formData.get("sector") || "").trim();
     const limit = Number(formData.get("limit") || 5);
+    const linkedinRole = String(formData.get("linkedin_role") || "").trim();
 
     if (!keyword) {
         setStatus("Keyword gerekli.", "error");
         return;
     }
 
-    setStatus("Keyword kaydediliyor ve mock crawl baslatiliyor...", "pending");
+    if (state.ui.searchMode === "linkedin") {
+        state.ui.linkedinPlan = buildLinkedInPlan({
+            keyword,
+            sector,
+            role: linkedinRole,
+        });
+        renderSearchMode();
+        setStatus("LinkedIn arama plani hazirlandi. Hesabi bu sisteme girmeden ayri sekmede ilerle.", "success");
+        return;
+    }
+
+    setStatus("Anahtar kelime kaydediliyor ve guvenli web aramasi baslatiliyor...", "pending");
 
     try {
         await apiRequest("/keywords", {
@@ -222,7 +274,43 @@ async function handleIntakeSubmit(event) {
         });
 
         elements.intakeForm.reset();
-        await refreshDashboard(`"${keyword}" icin yeni raw leadler uretildi.`);
+        hideRecentSearches();
+        await refreshDashboard(`"${keyword}" icin web aramasi tamamlandi.`);
+    } catch (error) {
+        setStatus(error.message, "error");
+    }
+}
+
+async function handleManualLeadSubmit(event) {
+    event.preventDefault();
+
+    const formData = new FormData(elements.manualLeadForm);
+    const companyName = String(formData.get("company_name") || "").trim();
+    const website = String(formData.get("website") || "").trim();
+    const keyword = String(formData.get("keyword") || "").trim();
+    const sector = String(formData.get("sector") || "").trim();
+
+    if (!companyName || !keyword) {
+        setStatus("Firma adi ve anahtar kelime gerekli.", "error");
+        return;
+    }
+
+    setStatus(website ? "Firma kaydi ekleniyor..." : "Firma kaydi ekleniyor, website aranıyor...", "pending");
+
+    try {
+        await apiRequest("/raw-leads/manual", {
+            method: "POST",
+            body: {
+                company_name: companyName,
+                website: website || null,
+                keyword,
+                sector: sector || null,
+            },
+        });
+
+        elements.manualLeadForm.reset();
+        hideRecentSearches();
+        await refreshDashboard(`"${companyName}" eklendi.`);
     } catch (error) {
         setStatus(error.message, "error");
     }
@@ -525,7 +613,9 @@ async function parseResponse(response) {
 
 function renderDashboard() {
     renderActorState();
+    renderSearchMode();
     renderKeywords();
+    renderRecentSearches();
     renderSystemPanel();
     if (elements.summaryGrid) {
         renderSummary();
@@ -533,6 +623,161 @@ function renderDashboard() {
     renderRawLeads();
     renderLeads();
     renderDetailPanel();
+}
+
+function buildRecentSearches(rawLeads) {
+    const uniqueSearches = [];
+    const seen = new Set();
+
+    rawLeads.forEach((item) => {
+        const keyword = String(item.keyword || "").trim();
+        const sector = String(item.sector || "").trim();
+        if (!keyword) {
+            return;
+        }
+
+        const key = `${keyword.toLowerCase()}::${sector.toLowerCase()}`;
+        if (seen.has(key)) {
+            return;
+        }
+
+        seen.add(key);
+        uniqueSearches.push({ keyword, sector });
+    });
+
+    return uniqueSearches.slice(0, 4);
+}
+
+function renderRecentSearches() {
+    if (!elements.recentSearchesBox) {
+        return;
+    }
+
+    if (!state.ui.recentSearchesOpen || !state.recentSearches.length) {
+        elements.recentSearchesBox.hidden = true;
+        elements.recentSearchesBox.innerHTML = "";
+        return;
+    }
+
+    elements.recentSearchesBox.hidden = false;
+    elements.recentSearchesBox.innerHTML = `
+        <div class="recent-searches-panel">
+            <p class="recent-searches-title">Son 4 arama</p>
+            <div class="recent-searches-list">
+                ${state.recentSearches
+                    .map(
+                        (item, index) => `
+                            <button
+                                class="recent-search-button"
+                                type="button"
+                                data-keyword="${escapeHtml(item.keyword)}"
+                                data-sector="${escapeHtml(item.sector || "")}"
+                            >
+                                <strong>${escapeHtml(`${index + 1}. ${item.keyword}`)}</strong>
+                                <span>${escapeHtml(item.sector || "Sektor yok")}</span>
+                            </button>
+                        `
+                    )
+                    .join("")}
+            </div>
+        </div>
+    `;
+}
+
+function showRecentSearches() {
+    if (state.ui.searchMode !== "web") {
+        return;
+    }
+
+    if (!state.recentSearches.length) {
+        return;
+    }
+
+    state.ui.recentSearchesOpen = true;
+    renderRecentSearches();
+}
+
+function hideRecentSearches() {
+    state.ui.recentSearchesOpen = false;
+    renderRecentSearches();
+}
+
+function handleRecentSearchClick(event) {
+    const button = event.target.closest("[data-keyword]");
+    if (!button) {
+        return;
+    }
+
+    elements.keywordInput.value = button.dataset.keyword || "";
+    elements.sectorInput.value = button.dataset.sector || "";
+    hideRecentSearches();
+}
+
+function handleDocumentClick(event) {
+    if (!state.ui.recentSearchesOpen) {
+        return;
+    }
+
+    const clickedInsideIntake = event.target.closest("#intakeForm");
+    const clickedInsideRecentSearches = event.target.closest("#recentSearchesBox");
+    const clickedInsideLinkedInAssist = event.target.closest("#linkedinAssistPanel");
+
+    if (clickedInsideIntake || clickedInsideRecentSearches || clickedInsideLinkedInAssist) {
+        return;
+    }
+
+    hideRecentSearches();
+}
+
+function handleSearchModeChange(event) {
+    const button = event.target.closest("[data-search-mode]");
+    if (!button) {
+        return;
+    }
+
+    state.ui.searchMode = button.dataset.searchMode === "linkedin" ? "linkedin" : "web";
+    state.ui.linkedinPlan = null;
+    hideRecentSearches();
+    renderSearchMode();
+}
+
+function renderSearchMode() {
+    const isLinkedIn = state.ui.searchMode === "linkedin";
+
+    if (elements.webModeButton) {
+        elements.webModeButton.classList.toggle("is-active", !isLinkedIn);
+    }
+
+    if (elements.linkedinModeButton) {
+        elements.linkedinModeButton.classList.toggle("is-active", isLinkedIn);
+    }
+
+    if (elements.linkedinRoleField) {
+        elements.linkedinRoleField.hidden = !isLinkedIn;
+    }
+
+    if (elements.linkedinOpenLink) {
+        elements.linkedinOpenLink.hidden = !isLinkedIn;
+    }
+
+    if (elements.intakeSubmitButton) {
+        elements.intakeSubmitButton.textContent = isLinkedIn ? "LinkedIn plani olustur" : "Web arama baslat";
+    }
+
+    if (elements.recentSearchesBox && isLinkedIn) {
+        elements.recentSearchesBox.hidden = true;
+        elements.recentSearchesBox.innerHTML = "";
+    }
+
+    if (elements.linkedinAssistPanel) {
+        elements.linkedinAssistPanel.hidden = !isLinkedIn;
+    }
+
+    if (elements.linkedinAssistResult) {
+        elements.linkedinAssistResult.innerHTML = isLinkedIn
+            ? renderLinkedInAssistResult(state.ui.linkedinPlan)
+            : "";
+    }
 }
 
 function renderActorState() {
@@ -543,11 +788,72 @@ function renderActorState() {
     }
 }
 
+function buildLinkedInPlan({ keyword, sector, role }) {
+    const normalizedKeyword = String(keyword || "").trim();
+    const normalizedSector = String(sector || "").trim();
+    const normalizedRole = String(role || "").trim();
+    const roleCandidates = [
+        normalizedRole,
+        "satin alma muduru",
+        "procurement manager",
+        "sourcing manager",
+        "operations manager",
+        "factory manager",
+        "purchase specialist",
+    ].filter(Boolean);
+    const uniqueRoles = [...new Set(roleCandidates)];
+    const scopeParts = [normalizedKeyword, normalizedSector].filter(Boolean).join(" ");
+    const queryLines = uniqueRoles.slice(0, 4).map((item) =>
+        [scopeParts, item, "Turkey"].filter(Boolean).join(" ")
+    );
+    const googleLine = [`site:linkedin.com/in`, scopeParts, uniqueRoles[0] || "", "Turkey"].filter(Boolean).join(" ");
+
+    return {
+        roles: uniqueRoles,
+        queries: queryLines,
+        googleQuery: googleLine,
+        note: "LinkedIn girisini ayri sekmede sen yap. Bu panel hesabi saklamaz; OpenClaw sadece arama plani verir.",
+    };
+}
+
+function renderLinkedInAssistResult(plan) {
+    if (!plan) {
+        return `
+            <div class="linkedin-assist-card">
+                <strong>LinkedIn modu</strong>
+                <p>Urun, sektor ve gerekirse rol gir. Sistem sana hazir arama cumleleri versin.</p>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="linkedin-assist-card">
+            <strong>Onerilen roller</strong>
+            <p>${escapeHtml(plan.roles.join(" | "))}</p>
+        </div>
+        <div class="linkedin-assist-card">
+            <strong>LinkedIn arama cumleleri</strong>
+            <ul class="linkedin-query-list">
+                ${plan.queries.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+            </ul>
+        </div>
+        <div class="linkedin-assist-card">
+            <strong>Google x-ray alternatifi</strong>
+            <p>${escapeHtml(plan.googleQuery)}</p>
+        </div>
+        <div class="linkedin-assist-card">
+            <strong>Not</strong>
+            <p>${escapeHtml(plan.note)}</p>
+        </div>
+    `;
+}
+
 function renderSystemPanel() {
     const runtime = state.system?.runtime || {};
     const health = state.system?.health || {};
     const connection = runtime.connection || {};
     const ai = state.system?.ai || {};
+    const ollama = state.system?.ollama || {};
 
     const cards = [
         {
@@ -559,8 +865,8 @@ function renderSystemPanel() {
             body: formatOpenClawSetup(ai),
         },
         {
-            title: "Baglanti",
-            body: ai.recommended_next_step || formatConnection(connection),
+            title: "Ollama",
+            body: formatOllamaStatus(ollama, ai.recommended_next_step || formatConnection(connection)),
         },
     ];
 
@@ -627,15 +933,15 @@ function renderSummary() {
 
 function renderRawLeads() {
     if (!state.rawLeads.length) {
-        elements.rawLeadList.innerHTML = renderEmptyState("Tarama baslatildiginda ham leadler burada listelenecek.");
+        elements.rawLeadList.innerHTML = renderEmptyState("Tarama baslatildiginda firmalar burada listelenecek.");
         return;
     }
 
     elements.rawLeadList.innerHTML = state.rawLeads
         .map((rawLead) => {
             const isSelected = state.selected?.kind === "raw" && state.selected.id === rawLead.id;
-            const researchDone = rawLead.research_status === "completed";
             const missingCount = (rawLead.missing_fields || []).length;
+            const cardSummary = rawLead.company_summary || rawLead.summary || "Arastirma bekliyor.";
 
             return `
                 <article class="lead-card ${isSelected ? "is-selected" : ""}" data-raw-id="${rawLead.id}">
@@ -650,7 +956,7 @@ function renderRawLeads() {
                             ${rawLead.priority ? renderBadge(rawLead.priority) : ""}
                         </div>
                     </div>
-                    <p class="card-copy">${escapeHtml(rawLead.summary || rawLead.company_summary || "Arastirma bekliyor.")}</p>
+                    <p class="card-copy">${escapeHtml(cardSummary)}</p>
                     <div class="card-footer">
                         <p class="mini-note">
                             ${escapeHtml(rawLead.keyword || "-")}
@@ -659,7 +965,6 @@ function renderRawLeads() {
                             •
                             eksik: ${escapeHtml(String(missingCount))}
                         </p>
-                        <button class="tiny-button accent" data-action="research" ${researchDone || !canWriteRawLeads() ? "disabled" : ""}>Arastir</button>
                     </div>
                 </article>
             `;
@@ -706,7 +1011,7 @@ function renderLeads() {
                         <div class="mini-control">
                             <span>CRM sorumlusu</span>
                             <div class="action-row">
-                                <input data-role="owner" type="text" value="${escapeHtml(lead.sales_owner || "")}" placeholder="demo-user">
+                                <input data-role="owner" type="text" value="${escapeHtml(lead.sales_owner || "")}" placeholder="satis-sorumlusu">
                                 <button class="tiny-button accent" data-action="crm-sync" ${!canWriteLeads() ? "disabled" : ""}>CRM aktar</button>
                             </div>
                         </div>
@@ -754,21 +1059,18 @@ function renderRawLeadPrimaryActions(rawLead) {
     const reviewReady = ["needs_review", "needs_revision", "on_hold"].includes(rawLead.status);
 
     return `
-        <div class="detail-note-stack">
+        <div class="compact-action-stack">
             <form class="detail-form detail-form-inline" data-detail-form="raw-research">
-                <button class="primary-button detail-button" type="submit" ${researchDone || !canWriteRawLeads() ? "disabled" : ""}>1. Arastirmayi calistir</button>
+                <button class="primary-button detail-button" type="submit" ${researchDone || !canWriteRawLeads() ? "disabled" : ""}>${researchDone ? "Arastirma tamam" : "Arastirmayi calistir"}</button>
             </form>
-            <form class="detail-form detail-form-inline" data-detail-form="raw-review">
+            <form class="detail-form detail-form-inline compact-review-form" data-detail-form="raw-review">
                 <input type="hidden" name="review_action" value="approve">
-                <label class="detail-field detail-field-wide">
-                    <span>Review notu</span>
-                    <textarea name="reviewer_note" rows="3" placeholder="Kisa karar notu"></textarea>
-                </label>
+                <input type="hidden" name="reviewer_note" value="">
                 <div class="action-row">
-                    <button class="tiny-button accent" type="submit" onclick="this.form.review_action.value='approve'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Approve</button>
+                    <button class="tiny-button accent" type="submit" onclick="this.form.review_action.value='approve'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Onayla</button>
                     <button class="tiny-button warm" type="submit" onclick="this.form.review_action.value='hold'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Beklet</button>
                     <button class="tiny-button" type="submit" onclick="this.form.review_action.value='revise'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Revize iste</button>
-                    <button class="tiny-button danger" type="submit" onclick="this.form.review_action.value='reject'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Reject</button>
+                    <button class="tiny-button danger" type="submit" onclick="this.form.review_action.value='reject'" ${!reviewReady || !canWriteRawLeads() ? "disabled" : ""}>Reddet</button>
                 </div>
             </form>
         </div>
@@ -791,13 +1093,12 @@ function renderDetailPanel() {
             return;
         }
 
-        const decisionMaker = rawLead.decision_maker || {};
         const timelineEntries = state.detail.rawTimelineById[rawLead.id] || [];
         const aiDrafts = state.detail.rawDraftsById[rawLead.id] || [];
         elements.detailPanel.innerHTML = `
             <div class="detail-card">
                 <div class="detail-block">
-                    <p class="section-kicker">Raw lead #${rawLead.id}</p>
+                    <p class="section-kicker">Secilen firma</p>
                     <h3>${escapeHtml(rawLead.company_name)}</h3>
                     <div class="badge-row">
                         ${renderBadge(rawLead.status)}
@@ -805,53 +1106,18 @@ function renderDetailPanel() {
                         ${rawLead.data_reliability ? renderBadge(rawLead.data_reliability) : ""}
                     </div>
                     <p class="detail-copy">${escapeHtml(rawLead.company_summary || "Arastirma tamamlandiginda bu alan dolacak.")}</p>
+                    <p class="detail-copy"><strong>Website:</strong> ${escapeHtml(rawLead.website || "-")}</p>
                     <p class="detail-copy detail-hint">${escapeHtml(getRawLeadHint(rawLead))}</p>
-                </div>
-                <div class="detail-block">
-                    <h4>Hizli aksiyon</h4>
                     ${renderRawLeadPrimaryActions(rawLead)}
                 </div>
                 <div class="detail-block">
-                    <h4>AI enrichment draft</h4>
+                    <h4>Arastirma sonucu</h4>
+                    ${renderRawLeadResearchPanel(rawLead)}
+                </div>
+                <div class="detail-block">
+                    <h4>AI taslagi</h4>
                     ${renderRawLeadAIDraftPanel(rawLead, aiDrafts)}
                 </div>
-                <details class="detail-block simple-toggle" open>
-                    <summary>Arastirma ozeti ve karar verici</summary>
-                    <div class="detail-two-col toggle-body">
-                        <div>
-                            <h4>Arastirma notlari</h4>
-                            <p class="detail-copy">${escapeHtml(rawLead.fit_reason || "Henuz fit nedeni yok.")}</p>
-                            <p class="detail-copy">${escapeHtml(rawLead.recent_signal || "Guncel sinyal bekleniyor.")}</p>
-                            <p class="detail-copy">Eksik veri: ${escapeHtml((rawLead.missing_fields || []).join(", ") || "yok")}</p>
-                        </div>
-                        <div>
-                            <h4>Karar verici</h4>
-                            <p class="detail-copy">Ad: ${escapeHtml(decisionMaker.name || "bulunmadi")}</p>
-                            <p class="detail-copy">Rol: ${escapeHtml(decisionMaker.title || "belirtilmedi")}</p>
-                            <p class="detail-copy">Email: ${escapeHtml(decisionMaker.email || "yok")}</p>
-                            <p class="detail-copy">LinkedIn hint: ${escapeHtml(decisionMaker.linkedin_hint || "yok")}</p>
-                        </div>
-                    </div>
-                </details>
-                <details class="detail-block simple-toggle">
-                    <summary>Timeline</summary>
-                    <div class="toggle-body">
-                        ${renderTimelineSection(timelineEntries)}
-                    </div>
-                </details>
-                <details class="detail-block simple-toggle">
-                    <summary>Duzenle ve not ekle</summary>
-                    <div class="detail-two-col toggle-body">
-                        <div>
-                            <h4>Kaydi duzenle</h4>
-                            ${renderRawLeadEditForm(rawLead)}
-                        </div>
-                        <div>
-                            <h4>Not ekle</h4>
-                            ${renderRawLeadNoteForm(rawLead)}
-                        </div>
-                    </div>
-                </details>
                 ${renderDetailState()}
             </div>
         `;
@@ -1232,144 +1498,110 @@ function renderLeadNoteForm(lead) {
 }
 
 function renderRawLeadAIDraftPanel(rawLead, drafts) {
-    const historyMode = state.detail.rawDraftHistoryModeById[rawLead.id] || "active";
     const openclawPreview = state.detail.openclawPreviewById[rawLead.id] || null;
     const latestDraft = drafts[0] || null;
-    const draftSummary = latestDraft
-        ? extractDraftPayload(latestDraft)
-        : null;
-    const reviewMeta = latestDraft
-        ? extractDraftReviewMeta(latestDraft)
-        : null;
-    const archiveMeta = latestDraft
-        ? extractDraftArchiveMeta(latestDraft)
-        : null;
-    const preview = latestDraft
-        ? state.detail.rawDraftPreviewById[latestDraft.id] || null
-        : null;
-    const compareSelection = state.detail.rawDraftCompareSelectionById[rawLead.id] || "";
-    const comparison = state.detail.rawDraftComparisonById[rawLead.id] || null;
-    const olderDrafts = drafts.slice(1);
+    const draftSummary = latestDraft ? extractDraftPayload(latestDraft) : null;
+    const reviewMeta = latestDraft ? extractDraftReviewMeta(latestDraft) : null;
+    const preview = latestDraft ? state.detail.rawDraftPreviewById[latestDraft.id] || null : null;
+    const aiActionLabel = openclawPreview?.runtime?.dry_run_only ? "AI deneme taslagi uret" : "AI taslagi uret";
+    const missingFieldsText = formatMissingFields(draftSummary?.missing_fields);
 
     return `
         <div class="detail-note-stack">
             <form class="detail-form" data-detail-form="raw-ai-create">
-                <p class="detail-copy">OpenClaw adapter sadece guvenli payload ile draft uretir. Kayit ancak manuel onayla degisir.</p>
-                <button class="secondary-button detail-button" type="submit" ${!canWriteRawLeads() ? "disabled" : ""}>OpenClaw dry run</button>
+                <button class="secondary-button detail-button" type="submit" ${!canWriteRawLeads() ? "disabled" : ""}>${aiActionLabel}</button>
             </form>
-            ${
-                openclawPreview
-                    ? renderOpenClawSandbox(openclawPreview)
-                    : '<div class="empty-state">OpenClaw sandbox yukleniyor...</div>'
-            }
-            <div class="history-item compare-toolbar">
-                <strong>Draft history gorunumu</strong>
-                <label class="detail-field">
-                    <span>Liste modu</span>
-                    <select data-detail-filter="draft-history-mode">
-                        <option value="active" ${historyMode === "active" ? "selected" : ""}>aktif draftlar</option>
-                        <option value="all" ${historyMode === "all" ? "selected" : ""}>tum history</option>
-                    </select>
-                </label>
-                <p>${historyMode === "active" ? "Arsivlenen draftlar gizleniyor." : "Tum draft versiyonlari listeleniyor."}</p>
-            </div>
             ${
                 latestDraft
                     ? `
                         <div class="history-item">
-                            <strong>Son draft #${escapeHtml(String(latestDraft.id))}</strong>
-                            <p>Provider: ${escapeHtml(latestDraft.provider)} | Durum: ${escapeHtml(latestDraft.status)}</p>
-                            <p>Summary: ${escapeHtml(draftSummary?.summary || "yok")}</p>
-                            <p>Fit reason: ${escapeHtml(draftSummary?.fit_reason || "yok")}</p>
-                            <p>Priority: ${escapeHtml(draftSummary?.priority || "yok")} | Confidence: ${escapeHtml(draftSummary?.confidence || "yok")}</p>
-                            ${preview ? `<p>Degisecek alan: ${escapeHtml(String(preview.changed_fields_total))}</p>` : ""}
+                            <strong>Son AI taslagi</strong>
+                            <p>Durum: ${escapeHtml(translateUiValue(latestDraft.status || "-"))}</p>
+                            <p>Ozet: ${escapeHtml(draftSummary?.summary || "yok")}</p>
+                            <p>Uygunluk nedeni: ${escapeHtml(draftSummary?.fit_reason || "yok")}</p>
+                            <p>Oncelik: ${escapeHtml(translateUiValue(draftSummary?.priority || "yok"))} | Guven: ${escapeHtml(translateUiValue(draftSummary?.confidence || "yok"))}</p>
+                            <p>Eksik alanlar: ${escapeHtml(missingFieldsText)}</p>
+                            ${preview ? `<p>Kayda uygulaninca guncellenecek alan: ${escapeHtml(String(preview.changed_fields_total))}</p>` : ""}
                             ${
                                 reviewMeta
-                                    ? `<p>Review: ${escapeHtml(reviewMeta.status || "-")} / ${escapeHtml(reviewMeta.actor_name || "-")} / ${escapeHtml(reviewMeta.note || "-")}</p>`
-                                    : ""
-                            }
-                            ${
-                                archiveMeta
-                                    ? `<p>Archive: ${escapeHtml(archiveMeta.actor_name || "-")} / ${escapeHtml(archiveMeta.note || "-")}</p>`
-                                    : ""
-                            }
-                            ${
-                                extractDraftRestoreMeta(latestDraft)
-                                    ? `<p>Restore: ${escapeHtml(extractDraftRestoreMeta(latestDraft).actor_name || "-")} / ${escapeHtml(extractDraftRestoreMeta(latestDraft).note || "-")} / ${escapeHtml(extractDraftRestoreMeta(latestDraft).restored_to || "-")}</p>`
+                                    ? `<p>Son karar: ${escapeHtml(reviewMeta.actor_name || "-")} / ${escapeHtml(reviewMeta.status || "-")} / ${escapeHtml(reviewMeta.note || "-")}</p>`
                                     : ""
                             }
                         </div>
-                        ${preview ? renderAIDraftPreview(preview) : '<div class="empty-state">Draft diff hazirlaniyor...</div>'}
-                        ${
-                            olderDrafts.length
-                                ? `
-                                    <div class="detail-history compare-history">
-                                        <div class="history-item compare-toolbar">
-                                            <strong>Draft history compare</strong>
-                                            <label class="detail-field">
-                                                <span>Eski draft sec</span>
-                                                <select data-detail-filter="draft-compare-id">
-                                                    ${renderDraftHistoryOptions(olderDrafts, compareSelection)}
-                                                </select>
-                                            </label>
-                                            <p>Son draft her zaman baz alinir. Sectigin onceki draft ile alan farklari asagida gosterilir.</p>
-                                        </div>
-                                        ${
-                                            comparison
-                                                ? renderAIDraftComparison(comparison)
-                                                : '<div class="empty-state">Karsilastirma hazirlaniyor...</div>'
-                                        }
-                                    </div>
-                                `
-                                : ""
-                        }
-                        ${renderDraftReviewActions(latestDraft)}
                         <form class="detail-form" data-detail-form="raw-ai-approve">
                             <input type="hidden" name="draft_id" value="${escapeHtml(String(latestDraft.id))}">
-                            <button class="primary-button detail-button" type="submit" ${latestDraft.status !== "pending" || !canWriteRawLeads() ? "disabled" : ""}>Son draft'i uygula</button>
+                            <button class="primary-button detail-button" type="submit" ${latestDraft.status !== "pending" || !canWriteRawLeads() ? "disabled" : ""}>Taslagi uygula</button>
                         </form>
-                        <form class="detail-form" data-detail-form="raw-ai-reject">
+                        <form class="detail-form detail-form-inline compact-review-form" data-detail-form="raw-ai-reject">
                             <input type="hidden" name="draft_id" value="${escapeHtml(String(latestDraft.id))}">
-                            <label class="detail-field detail-field-wide">
-                                <span>Reject notu</span>
-                                <textarea name="note" rows="3" placeholder="Neden reddedildi?"></textarea>
-                            </label>
-                            <button class="tiny-button danger detail-button" type="submit" ${latestDraft.status !== "pending" || !canWriteRawLeads() ? "disabled" : ""}>Son draft'i reject et</button>
+                            <input type="hidden" name="note" value="">
+                            <button class="tiny-button danger detail-button" type="submit" ${latestDraft.status !== "pending" || !canWriteRawLeads() ? "disabled" : ""}>Taslagi reddet</button>
                         </form>
-                        ${
-                            olderDrafts.length
-                                ? `<div class="detail-history">${olderDrafts
-                                    .slice(0, 4)
-                                    .map(
-                                        (draft) => `
-                                            <div class="history-item">
-                                                <strong>Draft #${escapeHtml(String(draft.id))}</strong>
-                                                <p>Durum: ${escapeHtml(draft.status)} | Olusturan: ${escapeHtml(draft.actor_name || "-")}</p>
-                                                <p>Tarih: ${escapeHtml(formatDate(draft.created_at))}</p>
-                                                ${
-                                                    extractDraftArchiveMeta(draft)
-                                                        ? `<p>Archive: ${escapeHtml(extractDraftArchiveMeta(draft).actor_name || "-")} / ${escapeHtml(extractDraftArchiveMeta(draft).note || "-")}</p>`
-                                                        : ""
-                                                }
-                                                ${
-                                                    extractDraftRestoreMeta(draft)
-                                                        ? `<p>Restore: ${escapeHtml(extractDraftRestoreMeta(draft).actor_name || "-")} / ${escapeHtml(extractDraftRestoreMeta(draft).note || "-")} / ${escapeHtml(extractDraftRestoreMeta(draft).restored_to || "-")}</p>`
-                                                        : ""
-                                                }
-                                                ${renderDraftReviewActions(draft, true)}
-                                            </div>
-                                        `
-                                    )
-                                    .join("")}</div>`
-                                : ""
-                        }
                     `
-                    : `<div class="empty-state">${
-                        historyMode === "active"
-                            ? "Aktif AI draft yok. Gerekirse tum history moduna gec."
-                            : "Bu raw lead icin henuz AI draft yok."
-                    }</div>`
+                    : `
+                        <div class="empty-state">Bu firma icin henuz AI taslagi yok.</div>
+                    `
             }
+        </div>
+    `;
+}
+
+function renderRawLeadResearchPanel(rawLead) {
+    const researchBundle = rawLead.research_bundle || null;
+    const decisionMaker = rawLead.decision_maker || {};
+    const reviewedSources = (researchBundle?.sources || []).filter((item) => item.status === "reviewed");
+    const sourceCount = researchBundle?.evidence_summary?.reviewed_count || reviewedSources.length;
+    const newsCount = researchBundle?.evidence_summary?.news_count || 0;
+    const missingFieldsText = (rawLead.missing_fields || []).join(", ") || "yok";
+
+    if (!researchBundle) {
+        return `
+            <div class="detail-note-stack">
+                <div class="empty-state">Henuz arastirma paketi yok. Once "Arastirmayi calistir" kullan.</div>
+                <p class="detail-copy">Eksik veri: ${escapeHtml(missingFieldsText)}</p>
+            </div>
+        `;
+    }
+
+    return `
+        <div class="detail-note-stack">
+            <div class="history-item source-summary-item">
+                <strong>${escapeHtml(rawLead.summary || "Arastirma ozeti hazir degil.")}</strong>
+                <p>${escapeHtml(rawLead.fit_reason || "Uygunluk nedeni henuz yok.")}</p>
+                <p>Kaynak: ${escapeHtml(String(sourceCount))} | Haber: ${escapeHtml(String(newsCount))} | Guvenilirlik: ${escapeHtml(translateUiValue(rawLead.data_reliability || "yok"))}</p>
+            </div>
+            <div class="detail-history source-list">
+                ${reviewedSources.length
+                    ? reviewedSources.map((source) => renderResearchSource(source)).join("")
+                    : '<div class="empty-state">Arastirma paketi var ama gorunur kaynak bulunmadi.</div>'}
+            </div>
+            <div class="history-item">
+                <p><strong>Guncel sinyal:</strong> ${escapeHtml(rawLead.recent_signal || "yok")}</p>
+                <p><strong>Eksik veri:</strong> ${escapeHtml(missingFieldsText)}</p>
+                <p><strong>Karar verici:</strong> ${escapeHtml(decisionMaker.name || "bulunmadi")} / ${escapeHtml(decisionMaker.title || "belirtilmedi")}</p>
+            </div>
+        </div>
+    `;
+}
+
+function renderResearchSource(source) {
+    const sourceUrl = source.url
+        ? `<a class="source-link" href="${escapeHtml(source.url)}" target="_blank" rel="noreferrer">kaynak ac</a>`
+        : "";
+
+    return `
+        <div class="history-item source-item">
+            <div class="source-top">
+                <strong>${escapeHtml(source.label || source.source_id || "kaynak")}</strong>
+                ${renderBadge(source.confidence || "medium")}
+            </div>
+            <p class="detail-copy"><strong>${escapeHtml(source.title || "Baslik yok")}</strong></p>
+            <p class="detail-copy">${escapeHtml(source.snippet || "Ozet yok")}</p>
+            <div class="source-meta">
+                <span>${escapeHtml(translateUiValue(source.relevance || "medium"))}</span>
+                ${source.published_at ? `<span>${escapeHtml(formatDate(source.published_at))}</span>` : ""}
+                ${sourceUrl}
+            </div>
         </div>
     `;
 }
@@ -1377,28 +1609,35 @@ function renderRawLeadAIDraftPanel(rawLead, drafts) {
 function renderOpenClawSandbox(preview) {
     const runtime = preview.runtime || {};
     const latestDraft = preview.latest_draft || null;
+    const panelTitle = runtime.dry_run_only ? "AI deneme onizlemesi" : "AI onizlemesi";
+    const usesOllama = runtime.model_provider === "ollama";
+    const gatewayLabel = usesOllama ? "gerekli degil" : runtime.gateway_configured ? "hazir" : "eksik";
+    const apiKeyLabel = usesOllama ? "gerekli degil" : runtime.api_key_configured ? "hazir" : "eksik";
+    const runtimeHint = usesOllama && !runtime.dry_run_only
+        ? "Ollama canli draft uretiyor. Tarayici ve gonderim hala kapali."
+        : runtime.recommended_next_step || "Bu panel sadece guvenli payload ve adapter sonucunu gosterir.";
 
     return `
         <div class="detail-history">
             <div class="history-item sandbox-item">
-                <strong>OpenClaw sandbox</strong>
-                <p>Provider: ${escapeHtml(runtime.provider || "openclaw")} | Mode: ${escapeHtml(runtime.mode || "mock")} | Draft sayisi: ${escapeHtml(String(preview.drafts_total || 0))}</p>
-                <p>Dry run: ${escapeHtml(runtime.dry_run_only ? "on" : "off")} | Gateway: ${escapeHtml(runtime.gateway_configured ? "configured" : "missing")} | Key: ${escapeHtml(runtime.api_key_configured ? "configured" : "missing")}</p>
-                <p>${escapeHtml(runtime.recommended_next_step || "Bu panel gercek entegrasyon oncesi OpenClaw'a ne gidecegini gosterir.")}</p>
+                <strong>${escapeHtml(panelTitle)}</strong>
+                <p>Kaynak: ${escapeHtml(runtime.provider || "openclaw")} | Mod: ${escapeHtml(translateUiValue(runtime.mode || "sandbox"))} | Taslak sayisi: ${escapeHtml(String(preview.drafts_total || 0))}</p>
+                <p>Deneme: ${escapeHtml(runtime.dry_run_only ? "acik" : "kapali")} | Ag gecidi: ${escapeHtml(gatewayLabel)} | Anahtar: ${escapeHtml(apiKeyLabel)}</p>
+                <p>${escapeHtml(runtimeHint)}</p>
             </div>
             <div class="history-item sandbox-item">
-                <strong>Safe request payload</strong>
+                <strong>Guvenli istek</strong>
                 <pre class="json-preview">${escapeHtml(formatJsonPreview(preview.request_payload || {}))}</pre>
             </div>
             <div class="history-item sandbox-item">
-                <strong>Latest adapter output</strong>
+                <strong>Son adapter cikisi</strong>
                 ${
                     latestDraft
                         ? `
                             <p>Draft #${escapeHtml(String(latestDraft.id))} | Status: ${escapeHtml(latestDraft.status || "-")} | Provider: ${escapeHtml(latestDraft.provider || "-")}</p>
                             <pre class="json-preview">${escapeHtml(formatJsonPreview(latestDraft.response_payload || {}))}</pre>
                         `
-                        : '<p>Henuz OpenClaw dry run sonucu yok. Once dry run butonunu kullan.</p>'
+                        : '<p>Henuz AI sonucu yok. Once taslak uret.</p>'
                 }
             </div>
         </div>
@@ -1418,9 +1657,9 @@ function renderAIDraftPreview(preview) {
                 .map(
                     (change) => `
                         <div class="history-item diff-item">
-                            <strong>${escapeHtml(change.label)}</strong>
-                            <p><span class="diff-label">Current:</span> ${escapeHtml(formatPreviewValue(change.current_value))}</p>
-                            <p><span class="diff-label">Draft:</span> ${escapeHtml(formatPreviewValue(change.draft_value))}</p>
+                            <strong>${escapeHtml(translateDraftFieldLabel(change.label))}</strong>
+                            <p><span class="diff-label">Mevcut:</span> ${escapeHtml(formatPreviewValue(change.current_value))}</p>
+                            <p><span class="diff-label">Taslak:</span> ${escapeHtml(formatPreviewValue(change.draft_value))}</p>
                         </div>
                     `
                 )
@@ -1439,7 +1678,7 @@ function renderAIDraftComparison(comparison) {
     return `
         <div class="detail-history">
             <div class="history-item compare-summary">
-                <strong>Latest draft #${escapeHtml(String(comparison.base_draft?.id || "-"))}</strong>
+                <strong>Son taslak #${escapeHtml(String(comparison.base_draft?.id || "-"))}</strong>
                 <p>Durum: ${escapeHtml(comparison.base_draft?.status || "-")} | Tarih: ${escapeHtml(formatDate(comparison.base_draft?.created_at))}</p>
                 <p>Karsilastirilan draft #${escapeHtml(String(comparison.compare_draft?.id || "-"))} | Durum: ${escapeHtml(comparison.compare_draft?.status || "-")}</p>
                 <p>Farkli alan: ${escapeHtml(String(comparison.changed_fields_total || 0))}</p>
@@ -1448,9 +1687,9 @@ function renderAIDraftComparison(comparison) {
                 .map(
                     (change) => `
                         <div class="history-item diff-item">
-                            <strong>${escapeHtml(change.label)}</strong>
-                            <p><span class="diff-label">Latest:</span> ${escapeHtml(formatPreviewValue(change.base_value))}</p>
-                            <p><span class="diff-label">Older:</span> ${escapeHtml(formatPreviewValue(change.compare_value))}</p>
+                            <strong>${escapeHtml(translateDraftFieldLabel(change.label))}</strong>
+                            <p><span class="diff-label">Son:</span> ${escapeHtml(formatPreviewValue(change.base_value))}</p>
+                            <p><span class="diff-label">Eski:</span> ${escapeHtml(formatPreviewValue(change.compare_value))}</p>
                         </div>
                     `
                 )
@@ -1498,9 +1737,9 @@ async function submitRawLeadUpdate(form) {
 async function submitRawLeadResearch() {
     const rawLeadId = state.selected?.id;
 
-    setStatus("Raw lead arastiriliyor...", "pending");
+    setStatus("Web arastirmasi calisiyor...", "pending");
     await apiRequest(`/raw-leads/${rawLeadId}/research`, { method: "POST" });
-    await refreshDashboard("Raw lead arastirma sonucu guncellendi.");
+    await refreshDashboard("Arastirma sonucu guncellendi.");
 }
 
 async function submitRawLeadReview(form) {
@@ -1578,12 +1817,14 @@ async function submitLeadNote(form) {
 
 async function submitRawLeadAIDraft() {
     const rawLeadId = state.selected?.id;
+    const runtime = state.detail.openclawPreviewById[rawLeadId]?.runtime || {};
+    const isDryRun = Boolean(runtime.dry_run_only);
 
-    setStatus("OpenClaw dry run calisiyor...", "pending");
+    setStatus(isDryRun ? "AI deneme taslagi calisiyor..." : "AI taslagi uretiliyor...", "pending");
     await apiRequest(`/ai/raw-leads/${rawLeadId}/enrichment-draft`, {
         method: "POST",
     });
-    await refreshDashboard("OpenClaw dry run sonucu alindi.");
+    await refreshDashboard(isDryRun ? "AI deneme sonucu alindi." : "AI taslagi alindi.");
 }
 
 async function submitRawLeadAIApproval(form) {
@@ -1690,6 +1931,18 @@ function formatOpenClawSetup(ai) {
     const modelProvider = ai.model_provider || "none";
     const modelName = ai.model_name || "-";
 
+    if (modelProvider === "ollama") {
+        return [
+            `durum: ${translateUiValue(ai.setup_state || "unknown")}`,
+            `model: ollama/${modelName}`,
+            `agent firma arama: ${ai.agent_discovery_enabled ? "acik" : "kapali"}`,
+            `agent arastirma: ${ai.agent_research_enabled ? "acik" : "kapali"}`,
+            `deneme: ${ai.dry_run_only ? "acik" : "kapali"}`,
+            `canli taslak: ${ai.live_calls_enabled ? "acik" : "kapali"}`,
+            `tarayici: ${ai.safety?.browser_automation_enabled ? "acik" : "kapali"}`,
+        ].join(" | ") + warningText;
+    }
+
     return [
         `durum: ${translateUiValue(ai.setup_state || "unknown")}`,
         `model: ${translateUiValue(modelProvider)}/${modelName}`,
@@ -1697,6 +1950,29 @@ function formatOpenClawSetup(ai) {
         `ag gecidi: ${ai.gateway_configured ? "hazir" : "eksik"}`,
         `tarayici: ${ai.safety?.browser_automation_enabled ? "acik" : "kapali"}`,
     ].join(" | ") + warningText;
+}
+
+function formatOllamaStatus(ollama, fallbackMessage) {
+    if (!ollama || !Object.keys(ollama).length) {
+        return fallbackMessage || "Ollama bilgisi yok";
+    }
+
+    if (!ollama.enabled) {
+        return "kapali";
+    }
+
+    const parts = [
+        `durum: ${translateUiValue(ollama.status || "unknown")}`,
+        `model: ${ollama.model || "-"}`,
+    ];
+
+    if (ollama.reachable) {
+        parts.push(`erisim: acik`);
+    } else {
+        parts.push(`erisim: kapali`);
+    }
+
+    return `${parts.join(" | ")}${ollama.message ? ` | ${ollama.message}` : ""}`;
 }
 
 function normalizeSelection() {
@@ -1767,7 +2043,7 @@ function syncActorFromInputs() {
     }
 
     state.actor.role = elements.actorRoleSelect.value || "admin";
-    state.actor.name = elements.actorNameInput.value.trim() || "demo-admin";
+    state.actor.name = elements.actorNameInput.value.trim() || "panel";
     window.localStorage.setItem("openclawpilot-actor", JSON.stringify(state.actor));
 }
 
@@ -1935,6 +2211,54 @@ function formatPreviewValue(value) {
     return value || "yok";
 }
 
+function formatMissingFields(values) {
+    if (!Array.isArray(values) || !values.length) {
+        return "yok";
+    }
+
+    return values.map((value) => translateFieldToken(value)).join(", ");
+}
+
+function translateDraftFieldLabel(label) {
+    const lookup = {
+        "company summary": "Sirket ozeti",
+        "recent signal": "Guncel sinyal",
+        "fit reason": "Uygunluk nedeni",
+        "summary": "Kisa ozet",
+        "priority": "Oncelik",
+        "confidence": "Guven",
+        "data reliability": "Veri guvenilirligi",
+        "missing fields": "Eksik alanlar",
+        "source notes": "Kaynak notlari",
+        "decision maker name": "Karar verici adi",
+        "decision maker title": "Karar verici unvani",
+        "decision maker email": "Karar verici e-postasi",
+        "decision maker linkedin_hint": "Karar verici LinkedIn ipucu",
+    };
+
+    return lookup[String(label || "").toLowerCase()] || label || "alan";
+}
+
+function translateFieldToken(value) {
+    const lookup = {
+        decision_maker_name: "karar verici adi",
+        decision_maker_title: "karar verici unvani",
+        decision_maker_email: "karar verici e-postasi",
+        "decision_marker_email": "karar verici e-postasi",
+        linkedin_profile: "LinkedIn profili",
+        "decision_maker.linkedin_hint": "karar verici LinkedIn ipucu",
+        "decision_maker.name": "karar verici adi",
+        "decision_maker.title": "karar verici unvani",
+        "decision_maker.email": "karar verici e-postasi",
+        company_summary: "sirket ozeti",
+        recent_signal: "guncel sinyal",
+        fit_reason: "uygunluk nedeni",
+        summary: "kisa ozet",
+    };
+
+    return lookup[String(value || "")] || String(value || "");
+}
+
 function formatJsonPreview(value) {
     try {
         return JSON.stringify(value, null, 2);
@@ -2062,13 +2386,18 @@ function translateUiValue(value) {
         viewer: "goruntuleyici",
         postgres: "postgres",
         sqlite: "sqlite",
-        mock: "deneme",
+        seeded: "baslangic arastirmasi",
         sandbox: "sandbox",
         gateway: "ag gecidi",
-        mock_ready: "deneme hazir",
+        ready: "hazir",
+        model_missing: "model eksik",
+        unreachable: "ulasilamiyor",
+        config_missing: "ayar eksik",
+        disabled: "kapali",
         sandbox_ready: "sandbox hazir",
         ollama_config_needed: "ollama ayari eksik",
         ollama_sandbox_ready: "ollama sandbox hazir",
+        ollama_live_ready: "ollama canli hazir",
         configured_waiting_live: "hazir, canli kapali",
         config_needed: "ayar gerekli",
         unknown: "bilinmiyor",

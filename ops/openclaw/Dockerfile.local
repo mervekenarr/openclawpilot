@@ -1,0 +1,24 @@
+FROM node:24-bookworm-slim
+
+ENV NODE_ENV=production
+ENV OPENCLAW_HOME=/home/node
+ENV HOME=/home/node
+
+WORKDIR /opt/openclaw
+
+COPY package.json openclaw.mjs ./
+COPY dist ./dist
+COPY assets ./assets
+COPY docs ./docs
+COPY skills ./skills
+
+RUN corepack enable \
+    && corepack prepare pnpm@10.23.0 --activate \
+    && pnpm install --prod --ignore-scripts=false --config.node-linker=hoisted
+
+RUN mkdir -p /home/node/.openclaw \
+    && chown -R node:node /opt/openclaw /home/node
+
+USER node
+
+ENTRYPOINT ["node", "/opt/openclaw/openclaw.mjs"]
