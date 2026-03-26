@@ -1,18 +1,40 @@
-Bu dizin, Docker ile calistirilacak OpenClaw gateway state'i icin ayrildi.
+Bu dizin OpenClaw Docker kurulum ve skill paketidir.
 
-Beklenen alt dizinler:
+Ana dosyalar:
 
-- `home/`
-- `workspace/`
+- `setup-openclaw-docker.ps1`
+  tum kurulumu baslatir
+- `build-openclaw.ps1`
+  global OpenClaw paketinden lokal Docker image build eder
+- `docker-compose.yml`
+  OpenClaw gateway ve CLI servisleri
+- `dashboard/index.html`
+  yardimci yerel panel
+- `skills/`
+  workspace skill'leri
 
-Bu klasorler git'e girmez. Amac:
+Runtime'da olusacak local klasorler:
 
-- OpenClaw state'ini uygulama kodundan ayirmak
-- DB ve repo workspace'i ile ayni trust boundary'de tutmamak
-- Gerekirse Docker OpenClaw runtime'ini tek hamlede temizleyebilmek
+- `runtime-home/`
+- `runtime-workspace/`
 
-Bu dizinler ilk kurulumda manuel olusturulabilir:
+Bu klasorler git'e girmez.
+
+Beklenen kullanim:
 
 ```powershell
-New-Item -ItemType Directory -Force -Path .\ops\openclaw\home, .\ops\openclaw\workspace
+cd .\ops\openclaw
+powershell -ExecutionPolicy Bypass -File .\setup-openclaw-docker.ps1
 ```
+
+Paneli acmak icin:
+
+```powershell
+start .\dashboard\index.html
+```
+
+Not:
+
+- panel LinkedIn giris sayfasini acabilir
+- ama LinkedIn sifresi, cookie veya session saklamaz
+- web arama icin OpenClaw gateway tokenini elle girersin

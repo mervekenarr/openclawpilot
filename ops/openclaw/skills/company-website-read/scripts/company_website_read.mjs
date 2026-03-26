@@ -7,7 +7,6 @@ const PRIORITY_TOKENS = [
   "corporate",
   "kurumsal",
   "hakkimizda",
-  "hakkımızda",
 ];
 
 const NOISE_TOKENS = [
@@ -22,6 +21,19 @@ const NOISE_TOKENS = [
   "en tr",
   "products industries company media contact",
 ];
+
+function foldText(value) {
+  return String(value || "")
+    .replace(/[ıİ]/g, "i")
+    .replace(/[şŞ]/g, "s")
+    .replace(/[ğĞ]/g, "g")
+    .replace(/[üÜ]/g, "u")
+    .replace(/[öÖ]/g, "o")
+    .replace(/[çÇ]/g, "c")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
 
 function parseArgs(argv) {
   const args = { url: "", company: "" };
@@ -138,7 +150,7 @@ function extractParagraphCandidates(html) {
 }
 
 function looksLikeNavigationNoise(text) {
-  const lowered = (text || "").toLowerCase();
+  const lowered = foldText(text);
   if (!lowered) {
     return true;
   }
@@ -168,7 +180,7 @@ function extractPriorityLinks(html, baseUrl) {
     if (!["http:", "https:"].includes(parsed.protocol) || parsed.hostname.toLowerCase() !== baseHost) {
       continue;
     }
-    const haystack = `${absoluteUrl.toLowerCase()} ${label.toLowerCase()}`;
+    const haystack = foldText(`${absoluteUrl} ${label}`);
     let score = 0;
     for (const token of PRIORITY_TOKENS) {
       if (haystack.includes(token)) {
@@ -203,7 +215,7 @@ function buildCombinedExcerpt(textExcerpt, relatedPages) {
 }
 
 function isLowSignal(value) {
-  const normalized = (value || "").trim().toLowerCase();
+  const normalized = foldText(value).trim();
   return !normalized || normalized.length < 12 || ["en", "tr", "english", "turkish", "home", "homepage"].includes(normalized);
 }
 
@@ -224,8 +236,8 @@ function estimateRelevance(textExcerpt, companyName) {
   if (!textExcerpt) {
     return "low";
   }
-  const loweredExcerpt = textExcerpt.toLowerCase();
-  const loweredCompany = (companyName || "").toLowerCase();
+  const loweredExcerpt = foldText(textExcerpt);
+  const loweredCompany = foldText(companyName);
   if (loweredCompany && loweredExcerpt.includes(loweredCompany)) {
     return "high";
   }
@@ -236,12 +248,12 @@ function estimateRelevance(textExcerpt, companyName) {
 }
 
 function scoreSummaryCandidate(text, companyName) {
-  const lowered = (text || "").toLowerCase();
+  const lowered = foldText(text);
   let score = 0;
   if (!lowered) {
     return score;
   }
-  if (companyName && lowered.includes(companyName.toLowerCase())) {
+  if (companyName && lowered.includes(foldText(companyName))) {
     score += 4;
   }
   for (const token of ["manufacturer", "supplier", "industrial", "valve", "vana", "metal", "engineering", "industry", "solution"]) {

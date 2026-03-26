@@ -5,7 +5,6 @@ metadata:
   {
     "openclaw":
       {
-        "emoji": "🔎",
         "os": ["linux"],
       },
   }

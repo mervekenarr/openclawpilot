@@ -32,7 +32,6 @@ const INDUSTRY_TOKENS = [
 const TURKEY_TOKENS = [
   "turkey",
   "turkiye",
-  "türkiye",
   "istanbul",
   "ankara",
   "izmir",
@@ -41,6 +40,19 @@ const TURKEY_TOKENS = [
   "gaziantep",
   "ostim",
 ];
+
+function foldText(value) {
+  return String(value || "")
+    .replace(/[ıİ]/g, "i")
+    .replace(/[şŞ]/g, "s")
+    .replace(/[ğĞ]/g, "g")
+    .replace(/[üÜ]/g, "u")
+    .replace(/[öÖ]/g, "o")
+    .replace(/[çÇ]/g, "c")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
 
 function parseArgs(argv) {
   const args = { keyword: "", sector: "", limit: 5 };
@@ -145,10 +157,10 @@ function normalizeCompanyTokens(companyName) {
     "sirketi",
     "limited",
   ]);
-  const tokens = (companyName.toLowerCase().match(/[a-z0-9çğıöşü]+/g) || []).filter(
+  const tokens = (foldText(companyName).match(/[a-z0-9]+/g) || []).filter(
     (token) => token.length > 1 && !ignored.has(token),
   );
-  return tokens.length ? tokens : [companyName.toLowerCase()];
+  return tokens.length ? tokens : [foldText(companyName)];
 }
 
 function scoreCandidateDomain(url, companyTokens) {
@@ -172,7 +184,7 @@ function inferCompanyName(title, url) {
   const normalizedTitle = decodeHtml(title);
   if (normalizedTitle) {
     const primary = normalizedTitle
-      .split(/\s[-|–—]\s/)[0]
+      .split(/\s[-|\u2013\u2014]\s/)[0]
       .replace(/\b(official website|homepage|anasayfa)\b/gi, "")
       .trim();
     if (primary.length >= 2) {
@@ -188,22 +200,24 @@ function inferCompanyName(title, url) {
 }
 
 function scoreEntry(entry, keyword, sector, companyName) {
-  const haystack = [entry.title, entry.snippet, entry.url, companyName]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  let score = 0;
+  const haystack = foldText(
+    [entry.title, entry.snippet, entry.url, companyName].filter(Boolean).join(" "),
+  );
+  const normalizedKeyword = foldText(keyword);
+  const normalizedSector = foldText(sector);
   const host = canonicalDomain(entry.url);
-  if (keyword && haystack.includes(keyword.toLowerCase())) {
+  let score = 0;
+
+  if (normalizedKeyword && haystack.includes(normalizedKeyword)) {
     score += 5;
   }
-  if (sector && haystack.includes(sector.toLowerCase())) {
+  if (normalizedSector && haystack.includes(normalizedSector)) {
     score += 3;
   }
   if (INDUSTRY_TOKENS.some((token) => haystack.includes(token))) {
     score += 2;
   }
-  if (["manufacturer", "üretim", "üretici", "sanayi", "industrial", "endüstri"].some((token) => haystack.includes(token))) {
+  if (["manufacturer", "uretim", "uretici", "sanayi", "industrial", "endustri"].some((token) => haystack.includes(token))) {
     score += 4;
   }
   if (TURKEY_TOKENS.some((token) => haystack.includes(token))) {

@@ -58,7 +58,6 @@ New-Item -ItemType Directory -Force -Path $runtimeHome, $runtimeWorkspace | Out-
 $env:OPENCLAW_CONFIG_DIR = $runtimeHome
 $env:OPENCLAW_WORKSPACE_DIR = $runtimeWorkspace
 $env:OPENCLAW_GATEWAY_BIND = "loopback"
-$env:OPENCLAW_IMAGE = "openclaw:local"
 $env:OPENCLAW_GATEWAY_TOKEN = $GatewayToken
 
 Write-Host ""
@@ -69,10 +68,15 @@ Write-Host "Ollama:" $OllamaBaseUrl " | model:" $OllamaModel
 Write-Host ""
 
 Write-Host "1/5 - Docker image build ediliyor..." -ForegroundColor Yellow
-& docker build -t openclaw:local -f Dockerfile .
+& powershell -ExecutionPolicy Bypass -File (Join-Path $runtimeDir "build-openclaw.ps1")
 if ($LASTEXITCODE -ne 0) {
-    throw "Docker build basarisiz oldu."
+    throw "OpenClaw image build basarisiz oldu."
 }
+
+$packageJsonPath = Join-Path ((Join-Path ((& npm root -g).Trim()) "openclaw")) "package.json"
+$package = Get-Content -Raw -Path $packageJsonPath | ConvertFrom-Json
+$version = $package.version
+$env:OPENCLAW_IMAGE = "openclaw-local:$version"
 
 Write-Host "2/5 - Ilk onboarding calistiriliyor..." -ForegroundColor Yellow
 Invoke-OpenClawConfig -Args @("onboard", "--mode", "local", "--no-install-daemon")
@@ -94,10 +98,16 @@ Invoke-OpenClawConfig -Args @("config", "set", "models.providers.ollama.models",
 Invoke-OpenClawConfig -Args @("config", "set", "agents.defaults.model.primary", "ollama/$OllamaModel")
 Invoke-OpenClawConfig -Args @("config", "set", "agents.defaults.models", $defaultsJson, "--strict-json")
 
-Write-Host "4/5 - Gateway baslatiliyor..." -ForegroundColor Yellow
-Invoke-OpenClawCompose -Args @("up", "-d", "openclaw-gateway")
+Write-Host "4/5 - Skill'ler runtime workspace'e kopyalaniyor..." -ForegroundColor Yellow
+$skillsSource = Join-Path $runtimeDir "skills"
+$skillsTarget = Join-Path $runtimeWorkspace "skills"
+New-Item -ItemType Directory -Force -Path $skillsTarget | Out-Null
+Get-ChildItem -LiteralPath $skillsSource | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $skillsTarget -Recurse -Force
+}
 
-Write-Host "5/5 - Saglik kontrolu..." -ForegroundColor Yellow
+Write-Host "5/5 - Gateway baslatiliyor..." -ForegroundColor Yellow
+Invoke-OpenClawCompose -Args @("up", "-d", "openclaw-gateway")
 Start-Sleep -Seconds 5
 Invoke-OpenClawCompose -Args @("ps")
 
@@ -106,4 +116,4 @@ Write-Host "OpenClaw Docker kurulumu tamamlandi." -ForegroundColor Green
 Write-Host "Dashboard: http://127.0.0.1:18789/"
 Write-Host "Token: $GatewayToken"
 Write-Host ""
-Write-Host "Sonraki adim: docker compose run --rm openclaw-cli dashboard --no-open" -ForegroundColor Cyan
+Write-Host "Kontrol: docker compose run --rm openclaw-cli skills list" -ForegroundColor Cyan
