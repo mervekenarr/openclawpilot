@@ -17,11 +17,9 @@ services:
     restart: unless-stopped
     command:
       [
-        "node",
-        "dist/index.js",
         "gateway",
         "--bind",
-        "${OPENCLAW_GATEWAY_BIND:-loopback}",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
         "--port",
         "18789",
       ]

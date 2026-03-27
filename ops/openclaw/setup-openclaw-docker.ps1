@@ -1,7 +1,8 @@
 param(
     [string]$OllamaBaseUrl = "http://172.16.41.43:11434",
     [string]$OllamaModel = "qwen2.5:14b",
-    [string]$GatewayToken = ""
+    [string]$GatewayToken = "",
+    [switch]$ForceBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,19 +17,19 @@ function New-RandomHexToken {
 function Invoke-OpenClawCompose {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$Args
+        [string[]]$Arguments
     )
 
-    & docker compose @Args
+    & docker compose @Arguments
     if ($LASTEXITCODE -ne 0) {
-        throw "Docker Compose komutu basarisiz oldu: docker compose $($Args -join ' ')"
+        throw "Docker Compose komutu basarisiz oldu: docker compose $($Arguments -join ' ')"
     }
 }
 
 function Invoke-OpenClawConfig {
     param(
         [Parameter(Mandatory = $true)]
-        [string[]]$Args
+        [string[]]$Arguments
     )
 
     $composeArgs = @(
@@ -39,9 +40,9 @@ function Invoke-OpenClawConfig {
         "node",
         "openclaw-gateway",
         "dist/index.js"
-    ) + $Args
+    ) + $Arguments
 
-    Invoke-OpenClawCompose -Args $composeArgs
+    Invoke-OpenClawCompose -Arguments $composeArgs
 }
 
 $runtimeDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -57,7 +58,7 @@ New-Item -ItemType Directory -Force -Path $runtimeHome, $runtimeWorkspace | Out-
 
 $env:OPENCLAW_CONFIG_DIR = $runtimeHome
 $env:OPENCLAW_WORKSPACE_DIR = $runtimeWorkspace
-$env:OPENCLAW_GATEWAY_BIND = "loopback"
+$env:OPENCLAW_GATEWAY_BIND = "lan"
 $env:OPENCLAW_GATEWAY_TOKEN = $GatewayToken
 
 Write-Host ""
@@ -67,36 +68,87 @@ Write-Host "Runtime workspace:" $runtimeWorkspace
 Write-Host "Ollama:" $OllamaBaseUrl " | model:" $OllamaModel
 Write-Host ""
 
-Write-Host "1/5 - Docker image build ediliyor..." -ForegroundColor Yellow
-& powershell -ExecutionPolicy Bypass -File (Join-Path $runtimeDir "build-openclaw.ps1")
-if ($LASTEXITCODE -ne 0) {
-    throw "OpenClaw image build basarisiz oldu."
-}
-
 $packageJsonPath = Join-Path ((Join-Path ((& npm root -g).Trim()) "openclaw")) "package.json"
 $package = Get-Content -Raw -Path $packageJsonPath | ConvertFrom-Json
 $version = $package.version
 $env:OPENCLAW_IMAGE = "openclaw-local:$version"
+$composeEnvPath = Join-Path $runtimeDir ".env"
 
-Write-Host "2/5 - Ilk onboarding calistiriliyor..." -ForegroundColor Yellow
-Invoke-OpenClawConfig -Args @("onboard", "--mode", "local", "--no-install-daemon")
+Write-Host "1/5 - Docker image hazirlaniyor..." -ForegroundColor Yellow
+& docker image inspect $env:OPENCLAW_IMAGE *> $null
+$imageExists = $LASTEXITCODE -eq 0
 
-Write-Host "3/5 - Guvenlik ayarlari yaziliyor..." -ForegroundColor Yellow
-Invoke-OpenClawConfig -Args @("config", "set", "gateway.mode", "local")
-Invoke-OpenClawConfig -Args @("config", "set", "gateway.bind", "loopback")
-Invoke-OpenClawConfig -Args @("config", "set", "gateway.auth.mode", "token")
-Invoke-OpenClawConfig -Args @("config", "set", "gateway.auth.token", $GatewayToken)
-Invoke-OpenClawConfig -Args @("config", "set", "browser.enabled", "false", "--strict-json")
+if ($ForceBuild -or -not $imageExists) {
+    Write-Host "Docker image build ediliyor:" $env:OPENCLAW_IMAGE -ForegroundColor Yellow
+    & powershell -ExecutionPolicy Bypass -File (Join-Path $runtimeDir "build-openclaw.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "OpenClaw image build basarisiz oldu."
+    }
+} else {
+    Write-Host "Mevcut image kullaniliyor:" $env:OPENCLAW_IMAGE -ForegroundColor DarkYellow
+}
 
-$modelsJson = "[{`"id`":`"$OllamaModel`",`"name`":`"$OllamaModel`",`"reasoning`":false,`"input`":[`"text`"],`"cost`":{`"input`":0,`"output`":0,`"cacheRead`":0,`"cacheWrite`":0},`"contextWindow`":8192,`"maxTokens`":81920}]"
-$defaultsJson = "{`"ollama/$OllamaModel`":{}}"
+[System.IO.File]::WriteAllText(
+    $composeEnvPath,
+    @(
+        "OPENCLAW_IMAGE=$($env:OPENCLAW_IMAGE)"
+        "OPENCLAW_GATEWAY_BIND=lan"
+    ) -join "`r`n",
+    (New-Object System.Text.UTF8Encoding($false))
+)
 
-Invoke-OpenClawConfig -Args @("config", "set", "models.providers.ollama.apiKey", "ollama-local")
-Invoke-OpenClawConfig -Args @("config", "set", "models.providers.ollama.baseUrl", $OllamaBaseUrl)
-Invoke-OpenClawConfig -Args @("config", "set", "models.providers.ollama.api", "ollama")
-Invoke-OpenClawConfig -Args @("config", "set", "models.providers.ollama.models", $modelsJson, "--strict-json")
-Invoke-OpenClawConfig -Args @("config", "set", "agents.defaults.model.primary", "ollama/$OllamaModel")
-Invoke-OpenClawConfig -Args @("config", "set", "agents.defaults.models", $defaultsJson, "--strict-json")
+Write-Host "2/5 - Konfigürasyon ve Guvenlik ayarlari yaziliyor..." -ForegroundColor Yellow
+Invoke-OpenClawConfig -Arguments @("config", "set", "gateway.mode", "local")
+Invoke-OpenClawConfig -Arguments @("config", "set", "gateway.bind", "lan")
+Invoke-OpenClawConfig -Arguments @("config", "set", "gateway.auth.mode", "token")
+Invoke-OpenClawConfig -Arguments @("config", "set", "gateway.auth.token", $GatewayToken)
+Invoke-OpenClawConfig -Arguments @("config", "set", "gateway.controlUi.allowedOrigins", "[`"http://127.0.0.1:18789`",`"http://localhost:18789`"]", "--strict-json")
+Invoke-OpenClawConfig -Arguments @("config", "set", "browser.enabled", "false", "--strict-json")
+
+Invoke-OpenClawConfig -Arguments @("config", "set", "models.providers.ollama.apiKey", "ollama-local")
+Invoke-OpenClawConfig -Arguments @("config", "set", "models.providers.ollama.baseUrl", $OllamaBaseUrl)
+Invoke-OpenClawConfig -Arguments @("config", "set", "models.providers.ollama.api", "ollama")
+Invoke-OpenClawConfig -Arguments @("config", "set", "agents.defaults.model.primary", "ollama/$OllamaModel")
+
+$batchConfigHost = Join-Path $runtimeHome "config-set.batch.json"
+$batchConfigContainer = "/home/node/.openclaw/config-set.batch.json"
+$batchConfig = @(
+    @{
+        path = "models.providers.ollama.models"
+        value = @(
+            @{
+                id = $OllamaModel
+                name = $OllamaModel
+                reasoning = $false
+                input = @("text")
+                cost = @{
+                    input = 0
+                    output = 0
+                    cacheRead = 0
+                    cacheWrite = 0
+                }
+                contextWindow = 32768
+                maxTokens = 81920
+            }
+        )
+    },
+    @{
+        path = "agents.defaults.models"
+        value = @{
+            ("ollama/$OllamaModel") = @{}
+        }
+    }
+)
+
+$batchJson = $batchConfig | ConvertTo-Json -Depth 8
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText($batchConfigHost, $batchJson, $utf8NoBom)
+
+Invoke-OpenClawConfig -Arguments @("config", "set", "--batch-file", $batchConfigContainer)
+Remove-Item -LiteralPath $batchConfigHost -Force -ErrorAction SilentlyContinue
+
+Write-Host "3/5 - Ilk onboarding calistiriliyor..." -ForegroundColor Yellow
+Invoke-OpenClawConfig -Arguments @("onboard", "--mode", "local", "--no-install-daemon")
 
 Write-Host "4/5 - Skill'ler runtime workspace'e kopyalaniyor..." -ForegroundColor Yellow
 $skillsSource = Join-Path $runtimeDir "skills"
@@ -107,9 +159,9 @@ Get-ChildItem -LiteralPath $skillsSource | ForEach-Object {
 }
 
 Write-Host "5/5 - Gateway baslatiliyor..." -ForegroundColor Yellow
-Invoke-OpenClawCompose -Args @("up", "-d", "openclaw-gateway")
+Invoke-OpenClawCompose -Arguments @("up", "-d", "openclaw-gateway")
 Start-Sleep -Seconds 5
-Invoke-OpenClawCompose -Args @("ps")
+Invoke-OpenClawCompose -Arguments @("ps")
 
 Write-Host ""
 Write-Host "OpenClaw Docker kurulumu tamamlandi." -ForegroundColor Green

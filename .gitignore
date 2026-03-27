@@ -9,3 +9,4 @@ ops/openclaw/runtime-home/
 ops/openclaw/runtime-workspace/
 ops/openclaw/home/
 ops/openclaw/workspace/
+ops/openclaw/.env
