@@ -1,0 +1,7 @@
+streamlit
+duckduckgo-search
+playwright
+trafilatura
+requests
+python-dotenv
+beautifulsoup4

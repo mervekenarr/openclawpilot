@@ -1,104 +1,52 @@
-# OpenClaw Pilot
+# 🤖 AI Satış Asistanı & Şirket Analisti (Pro v2.5)
 
-Bu repo artik `OpenClaw-first` teslim paketidir.
+Bu proje, satış ekiplerinin pazar araştırması, rakip analizi ve aday müşteri (prospekt) bulma süreçlerini tamamen otomatize eden, Python tabanlı profesyonel bir yapay zeka aracıdır.
 
-Amac:
+---
 
-- OpenClaw ile `urun + sektor` bazli firma aramak
-- bulunan resmi web sitelerini okumak
-- kisa ve satis odakli ozet cikarmak
-- bunu guvenli, `read-only` ve LinkedIn otomasyonsuz yapmak
+## 🔥 Temel Özellikler
 
-Bu repoda artik `FastAPI`, CRM ve outreach kodu yoktur. Teslim paketi Docker'da calisan OpenClaw gateway, skill'ler ve yardimci panelden olusur.
+- **⚡ Smart Start (Hibrit Keşif)**: Bing, DuckDuckGo ve LinkedIn ağını aynı anda tarayarak en güncel şirket listelerini saniyeler içinde oluşturur.
+- **🧐 AI Karar Destek (0-10 Uygunluk Skoru)**: Yapay zeka, bulunan her şirketin web sitesine girer, içeriği okur ve belirlediğiniz ürün/sektörle ne kadar uyumlu olduğunu puanlar.
+- **📄 Akıllı Şirket Özeti**: Her aday firmanın ne iş yaptığını ve hangi sektörlere odaklandığını tek cümlede raporlar.
+- **✉️ Kişiselleştirilmiş Satış Mesajları**: AI, her firma için o firmaya özel, "kanca" cümleler (Hook) barındıran satış teklifi taslakları hazırlar.
+- **🛡️ Güvenli & Yerel Veri**: Tüm analizler yerel ağınızda (Ollama) gerçekleşir; verileriniz dışarı sızmaz.
 
-## Mimari
+## 🚀 Hızlı Başlangıç
 
+### 1. Gereksinimler
+- **Python 3.10+**
+- **Ollama** (LLM Sunucusu - `qwen2.5:3b` modeli yüklü olmalıdır)
+- **LinkedIn li_at Token** (LinkedIn aramaları için opsiyoneldir, `.env` dosyasına eklenir)
+
+### 2. Kurulum
+Bağımlılıkları yüklemek için terminalden şu komutu çalıştırın:
+```bash
+pip install -r requirements.txt
+playwright install chromium
+```
+
+### 3. Çalıştırma
+Proje kök dizinindeki başlatıcıyı kullanabilirsiniz:
 ```text
-OpenClaw Docker Gateway -> Skills -> Public Web Search / Official Website Read -> Ollama
+AnaliziBaslat.bat
 ```
+*(Ya da manuel olarak: `streamlit run ops/openclaw/dashboard.py`)*
 
-Guvenlik siniri:
+## 🏗️ Proje Yapısı
 
-- LinkedIn otomasyonu yok
-- browser automation yok
-- canli mesaj gonderimi yok
-- cookie / sifre / oturum saklama yok
-- sadece public web ve resmi website okuma var
+- **`dashboard.py`**: Modern ve kullanıcı dostu Streamlit arayüzü.
+- **`engine.py`**: Arama, web kazıma ve puanlama yapan ana Python motoru.
+- **`setup_openclaw.py`**: İlk kurulum ve yapılandırma sihirbazı.
+- **`AnaliziBaslat.bat`**: Kullanıcı dostu tek tıkla başlatma dosyası.
 
-## Repo Yapisi
+---
 
-- `ops/openclaw/`
-  OpenClaw Docker kurulum ve skill paketi
-- `ops/openclaw/skills/company-search/`
-  urun + sektor ile firma arama
-- `ops/openclaw/skills/company-website-read/`
-  resmi website okuma
-- `ops/openclaw/skills/company-lead-discovery/`
-  arama + website okuma + kisa liste
-- `ops/openclaw/dashboard/index.html`
-  yerel yardimci panel
+## 🛠️ Teknik Detaylar
+- **UI**: Streamlit
+- **Search Engine**: Playwright (Geçici Tarayıcı Otomasyonu) + HTTP Scrapers
+- **AI Model**: Ollama / Qwen 2.5 (3B / 7B / 14B destekler)
+- **Veri Okuma**: Trafilatura (Hızlı ve Temiz Metin Ekstraksiyonu)
 
-## Hizli Kurulum
-
-1. Docker Desktop'i ac.
-2. Makinede global `openclaw` npm paketi kurulu olsun.
-3. Asagidaki scripti calistir:
-
-```powershell
-cd C:\Users\bt.stajyer\openclawpilot\openclawpilot\ops\openclaw
-powershell -ExecutionPolicy Bypass -File .\setup-openclaw-docker.ps1
-```
-
-Varsayilanlar:
-
-- Ollama URL: `http://172.16.41.43:11434`
-- Model: `qwen2.5:14b`
-- Gateway: `127.0.0.1:18789`
-
-Script ne yapar:
-
-- global OpenClaw paketinden lokal Docker image build eder
-- Docker icinde OpenClaw onboarding yapar
-- `loopback + token auth` ayarlar
-- browser'i kapatir
-- remote Ollama'ya baglar
-- gateway'i ayaga kaldirir
-- skill'leri runtime workspace'e kopyalar
-
-## Yardimci Panel
-
-Yardimci paneli acmak icin:
-
-```powershell
-start C:\Users\bt.stajyer\openclawpilot\openclawpilot\ops\openclaw\dashboard\index.html
-```
-
-Panel ne yapar:
-
-- OpenClaw arama promptunu hazirlar
-- OpenClaw arayuzunu token ile acar
-- LinkedIn giris sayfasini ayri sekmede acar
-
-LinkedIn butonu sadece giris sayfasini acar. Otomatik login, session tasima veya token saklama yapilmaz.
-
-## OpenClaw'da Kullanim
-
-OpenClaw chat'te su prompt ile baslayabilirsin:
-
-```text
-Vana ve metal sektorunde Turkiye'deki uretici firmalari ara. company-lead-discovery skillini kullan. Bana firma adi, resmi web sitesi, kisa Turkce ozet ve neden uygun olabilecegini listele. LinkedIn kullanma.
-```
-
-## LinkedIn Notu
-
-Bu repo LinkedIn'e otomatik girmez.
-
-Ozellikle yapmadigimiz seyler:
-
-- sahte hesap
-- gecici mail
-- otomatik login
-- bot / scraping
-- cookie / session kopyalama
-
-OpenClaw burada `web arama ve website arastirma` motorudur.
+---
+*OpenClaw Pilot Proje - Geleceğin Satış Otomasyonu Çözümleri*

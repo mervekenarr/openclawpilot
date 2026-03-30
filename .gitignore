@@ -10,3 +10,5 @@ ops/openclaw/runtime-workspace/
 ops/openclaw/home/
 ops/openclaw/workspace/
 ops/openclaw/.env
+ops/openclaw/session-manager.js
+ops/openclaw/test-session.json
