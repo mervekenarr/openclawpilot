@@ -1,0 +1,86 @@
+{
+  "e1bf4d0de51931046b495b94e93fa0f5cccd71c58f27777cdca2b5b730579701": {
+    "deviceId": "e1bf4d0de51931046b495b94e93fa0f5cccd71c58f27777cdca2b5b730579701",
+    "publicKey": "l_UYOjKqxwobCwfTkVF_kQGF7kz4E9IVaxJ1jUFmm8g",
+    "platform": "linux",
+    "clientId": "gateway-client",
+    "clientMode": "ui",
+    "role": "operator",
+    "roles": [
+      "operator"
+    ],
+    "scopes": [
+      "operator.admin",
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.pairing"
+    ],
+    "approvedScopes": [
+      "operator.admin",
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.pairing"
+    ],
+    "tokens": {
+      "operator": {
+        "token": "o2gt2ymzAg9qSW5I7T0o02bta4rZ2JkW7YQjFNe9f6A",
+        "role": "operator",
+        "scopes": [
+          "operator.admin",
+          "operator.approvals",
+          "operator.pairing",
+          "operator.read",
+          "operator.write"
+        ],
+        "createdAtMs": 1774534542432
+      }
+    },
+    "createdAtMs": 1774534542431,
+    "approvedAtMs": 1774534542431,
+    "displayName": "openclaw-tui"
+  },
+  "88d8ac4c1a049544ef144126fc06c56412fa1234121b6917baf055f089e39281": {
+    "deviceId": "88d8ac4c1a049544ef144126fc06c56412fa1234121b6917baf055f089e39281",
+    "publicKey": "aLr2FgqLekdbCFXe_4-jVUhz6rbPWeYq6QvGqC7-v10",
+    "platform": "Win32",
+    "clientId": "openclaw-control-ui",
+    "clientMode": "webchat",
+    "role": "operator",
+    "roles": [
+      "operator"
+    ],
+    "scopes": [
+      "operator.admin",
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.pairing"
+    ],
+    "approvedScopes": [
+      "operator.admin",
+      "operator.read",
+      "operator.write",
+      "operator.approvals",
+      "operator.pairing"
+    ],
+    "remoteIp": "172.18.0.1",
+    "tokens": {
+      "operator": {
+        "token": "kw3-JA2GJUdgLbj27NV_JMcFQECx846_6P7X9b07D44",
+        "role": "operator",
+        "scopes": [
+          "operator.admin",
+          "operator.approvals",
+          "operator.pairing",
+          "operator.read",
+          "operator.write"
+        ],
+        "createdAtMs": 1774534569120
+      }
+    },
+    "createdAtMs": 1774534569120,
+    "approvedAtMs": 1774534569120
+  }
+}

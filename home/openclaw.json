@@ -1,0 +1,15 @@
+{
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "gateway": {
+    "mode": "local"
+  },
+  "meta": {
+    "lastTouchedVersion": "2026.3.23",
+    "lastTouchedAt": "2026-03-25T10:48:18.682Z"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://host.docker.internal:11434",
+      "apiKey": "ollama-local",
+      "api": "ollama",
+      "models": [
+        {
+          "id": "qwen2.5:3b",
+          "name": "qwen2.5:3b",
+          "reasoning": false,
+          "input": [
+            "text"
+          ],
+          "cost": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheWrite": 0
+          },
+          "contextWindow": 32768,
+          "maxTokens": 81920
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.3.23-2",
+    "lastTouchedAt": "2026-03-26T13:39:11.484Z"
+  },
+  "browser": {
+    "enabled": false
+  },
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://172.16.41.43:11434",
+        "apiKey": "ollama-local",
+        "api": "ollama",
+        "models": [
+          {
+            "id": "qwen2.5:14b",
+            "name": "qwen2.5:14b",
+            "reasoning": false,
+            "input": [
+              "text"
+            ],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 8192,
+            "maxTokens": 81920
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/qwen2.5:14b"
+      },
+      "models": {
+        "ollama/qwen2.5:14b": {}
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "gateway": {
+    "mode": "local",
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "6221a86c9efe17ca4c8a1f3fd3b807988a2d5da697788bc3585fdc51062ea5cf"
+    }
+  }
+}
