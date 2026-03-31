@@ -383,37 +383,37 @@ else:
                         read_res = read_website_content(next((c.get("website") for c in w_data if c.get("company_name") == comp), ""))
                         s.update(label=f"✅ {comp} incelendi", state="complete")
                     
-                        # 2. AI'ya analiz ettir
-                        with st.spinner("🤖 Strateji oluşturuluyor..."):
-                            prompt = f"Şu veriye göre {comp} için satış teklifi hazırla:\n{read_res[:2500]}"
-                            messages_history.append({"role": "user", "content": prompt})
-                            ai_ana, info = call_llm_raw(messages_history, mode=m_str, gateway_pw=g_pw, timeout=60)
-                            
-                            # 3. ANALİZ KARTINI BAS (REGEX İLE JSON TEMİZLEME)
-                            # Varsayılan değerler (Hata durumunda)
-                            f_score = 5
-                            f_summary = next((c.get("snippet", "Özet bulunamadı.") for c in w_data if c.get("company_name") == comp), "Firma bilgisi alınamadı.")
-                            f_script = "Yapay Zeka yanıt vermedi, lütfen tekrar deneyin veya bağlantıyı kontrol edin."
+                    # 2. AI'ya analiz ettir
+                    with st.spinner("🤖 Strateji oluşturuluyor..."):
+                        prompt = f"Şu veriye göre {comp} için satış teklifi hazırla:\n{read_res[:2500]}"
+                        messages_history.append({"role": "user", "content": prompt})
+                        ai_ana, info = call_llm_raw(messages_history, mode=m_str, gateway_pw=g_pw, timeout=60)
+                        
+                        # 3. ANALİZ KARTINI BAS (REGEX İLE JSON TEMİZLEME)
+                        # Varsayılan değerler (Hata durumunda)
+                        f_score = 5
+                        f_summary = next((c.get("snippet", "Özet bulunamadı.") for c in w_data if c.get("company_name") == comp), "Firma bilgisi alınamadı.")
+                        f_script = "Yapay Zeka yanıt vermedi, lütfen tekrar deneyin veya bağlantıyı kontrol edin."
 
-                            try:
-                                if ai_ana:
-                                    match = re.search(r'\{.*\}', ai_ana, re.DOTALL)
-                                    if match:
-                                        ana_json = json.loads(match.group(0))
-                                        f_score = ana_json.get("score", 5)
-                                        f_summary = ana_json.get("summary", f_summary)
-                                        f_script = ana_json.get("sales_script", f_script)
-                                    else:
-                                        f_summary = ai_ana if len(ai_ana) > 20 else f_summary
-                            except:
-                                pass
+                        try:
+                            if ai_ana:
+                                match = re.search(r'\{.*\}', ai_ana, re.DOTALL)
+                                if match:
+                                    ana_json = json.loads(match.group(0))
+                                    f_score = ana_json.get("score", 5)
+                                    f_summary = ana_json.get("summary", f_summary)
+                                    f_script = ana_json.get("sales_script", f_script)
+                                else:
+                                    f_summary = ai_ana if len(ai_ana) > 20 else f_summary
+                        except:
+                            pass
 
-                            col1, col2 = st.columns([1, 4])
-                            col1.metric("Uygunluk", f"{f_score}/10")
-                            col2.markdown(f"**📄 Firma Özeti:** {f_summary}")
-                            
-                            st.info(f"**✉️ Özel Satış Mesajı Taslağı:**\n\n{f_script}")
-                            st.caption(f"🤖 Kaynak Bilgisi: {info}")
+                        col1, col2 = st.columns([1, 4])
+                        col1.metric("Uygunluk", f"{f_score}/10")
+                        col2.markdown(f"**📄 Firma Özeti:** {f_summary}")
+                        
+                        st.info(f"**✉️ Özel Satış Mesajı Taslağı:**\n\n{f_script}")
+                        st.caption(f"🤖 Kaynak Bilgisi: {info}")
 
                         # Rapor için veriyi sakla
                         st.session_state.current_results.append({

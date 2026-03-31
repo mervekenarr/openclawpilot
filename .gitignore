@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 .venv/
 __pycache__/
 *.pyc
@@ -12,3 +13,13 @@ ops/openclaw/workspace/
 ops/openclaw/.env
 ops/openclaw/session-manager.js
 ops/openclaw/test-session.json
+=======
+.openclaw-home/
+assets/
+data/
+ops/
+__pycache__/
+*.pyc
+.venv/
+.env
+>>>>>>> ef6b2db (feat: AI Sales Assistant Pro v2.5 - Professionalization, Strict Firm Filtering & Dynamic Location Accuracy)

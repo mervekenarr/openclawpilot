@@ -148,7 +148,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
         with sync_playwright() as p:
             # Bing bot koruması konusunda daha esnek olduğu için Chromium kullanıyoruz
             browser = p.chromium.launch(headless=True)
-            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
             page = context.new_page()
             
             # 1. BÖLÜM: BING ARAMASI (HİBRİT)
@@ -158,7 +158,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                     c_code = ISO_COUNTRY_MAP.get(country.lower(), "US")
                     lang_cc = f"&setlang=en&cc={c_code}" if c_code != "TR" else "&setlang=tr&cc=TR"
                     search_url = f"https://www.bing.com/search?q={q.strip()}{lang_cc}"
-                    page.goto(search_url, wait_until="networkidle", timeout=40000)
+                    page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
                     
                     # Sonuçları ayıkla
                     results = page.query_selector_all('li.b_algo')
@@ -249,8 +249,8 @@ def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5)
             # Oturum Çerezi Ekle
             context.add_cookies([{"name": "li_at", "value": li_at, "domain": ".linkedin.com", "path": "/"}])
             
-            # Sayfaya git (Max 40 saniye bekle - takılı kalmamak için)
-            page.goto(search_url, wait_until="networkidle", timeout=40000)
+            # Sayfaya git (Max 20 saniye bekle - takılı kalmamak için)
+            page.goto(search_url, wait_until="domcontentloaded", timeout=20000)
             
             if "login" in page.url or "authwall" in page.url:
                 browser.close()
@@ -282,4 +282,8 @@ def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5)
             
     return results
 
-
+if __name__ == "__main__":
+    # Test
+    print("--- Arama Testi (Valves Singapore) ---")
+    res = search_web_companies("Valve", "Industrial", "Singapore", "Singapore", limit=2)
+    print(json.dumps(res, indent=2))

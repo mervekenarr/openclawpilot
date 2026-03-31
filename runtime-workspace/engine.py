@@ -24,9 +24,8 @@ BLOCKED_HOST_TOKENS = [
 ] # LİNKEDİN ÇIKARILDI: LinkedIn sonuçlarının gelmesi için engeli kaldırdık.
 
 INDUSTRY_TOKENS = [
-    "industry", "industrial", "manufacturing", "supplier", "manufacturer", 
-    "corporation", "limited", "ltd", "inc", "group", "holding", "services", 
-    "solutions", "global", "enterprise", "distributor", "factory", "production"
+    "valve", "vana", "flow", "industry", "industrial", "metal", 
+    "manufacturing", "supplier", "manufacturer", "endustriyel", "imalat"
 ]
 
 ISO_COUNTRY_MAP = {
@@ -80,41 +79,37 @@ def score_candidate(entry, keyword, sector, location, country):
     if any(token in haystack for token in INDUSTRY_TOKENS): score += 3
     if any(token in haystack for token in ["manufacturer", "uretim", "uretici", "sanayi", "industrial", "fabrik"]): score += 7
     
-    # Lokasyon Puanlaması (Eğer eşleşme varsa BÜYÜK PUAN, yoksa ağır ceza)
+    # Lokasyon Puanlaması (Eğer eşleşme varsa BÜYÜK PUAN, yoksa küçük ceza)
     loc_hit = False
     for t in loc_tokens:
         if t in haystack:
-            score += 35 # ARTIŞ: Dinamik lokasyon eşleşmesi artık kritik öneme sahip
+            score += 15 # ARTIŞ: Lokasyon eşleşmesi artık çok daha ağırlıklı
             loc_hit = True
             
     # Domain bazlı coğrafi kontrol (GLOBAL-GENEL)
     domain = entry.get('href', '').lower()
     c_fold = country.lower().strip()
-    is_foreign = c_fold not in ["turkiye", "turkey", "tr"] 
+    is_foreign = c_fold not in ["turkiye", "turkey", "tr"] # TÜM DÜNYA İÇİN: Eğer Türkiye değilse yurt dışıdır.
     
     if (".tr" in domain or ".com.tr" in domain) and "linkedin.com" not in domain:
         if is_foreign:
-            score -= 60 # Yurt dışı aramalarında Türk sitelerini daha sert yasakla
+            score -= 50 # Yurt dışı aramalarında Türk sitelerini yasakla (LinkedIn HARİÇ)
         else:
-            score += 20
+            score += 15
             loc_hit = True
             
-    # Hedef ülke TLD'sine tam uyum
+    # Hedef ülke TLD'sine tam uyum (Kısmi Guessing)
     target_tld = TLD_MAP.get(c_fold, "")
     if not target_tld and is_foreign:
         c_code = ISO_COUNTRY_MAP.get(c_fold, "").lower()
-        if c_code: target_tld = f".{c_code}" 
+        if c_code: target_tld = f".{c_code}" # Dinamik TLD tahmini (it, es, fr vb.)
     if target_tld and domain.endswith(target_tld):
-        score += 30 
+        score += 25 
         loc_hit = True
 
-    # Eğer lokasyon belirtilmiş ama içerikte hiçbir iz yoksa ağır ceza
+    # Eğer lokasyon belirtilmiş ama içerikte en ufak bir iz bile yoksa ceza
     if loc_tokens and not loc_hit:
-        score -= 30 # ARTIŞ: Sapmaları (Ankara yerine İstanbul gelmesi) engellemek için ceza artırıldı
-    
-    # KİŞİSEL PROFİL CEZASI (URL bazlı son kontrol)
-    if any(x in domain for x in ["/in/", "/pub/", "/people/"]):
-        score -= 100 # Şirket arıyoruz, kişileri değil.
+        score -= 5 # ARTIŞ: Başka ülkeden gelenleri elemek için ceza artırıldı
         
     return score
 
@@ -124,23 +119,19 @@ def score_candidate(entry, keyword, sector, location, country):
 
 def search_web_companies(keyword, sector, location="", country="", limit=6):
     """Bing üzerinden en sağlam ve engellenemez (CAPTCHA bypass) şekilde şirket arar."""
-    loc_str = f'"{location}" {country}'.strip() if location else country
+    loc_str = f"{location} {country}".strip()
     target_tld = TLD_MAP.get(country.lower(), "")
-    
-    # Lokasyonu tırnak içine alarak Bing'i bu kelimeye zorluyoruz (Dinamik)
-    q_loc = f'"{location}"' if location else ""
-    
     web_queries = [
-        f"{keyword} {q_loc} {country} official website",
-        f"{keyword} {q_loc} {country}",
-        f"{keyword} manufacturer in {q_loc} {country}"
+        f"{keyword} {location} {country} official website",
+        f"{keyword} {location} {country}",
+        f"{keyword} manufacturer in {location} {country}"
     ]
     li_queries = [
-        f"site:linkedin.com/company/ {keyword} {q_loc} {country}",
-        f"{keyword} {q_loc} {country} official linkedin company"
+        f"site:linkedin.com/company/ {keyword} {location} {country}",
+        f"{keyword} {location} {country} official linkedin company" # 'company' eklendi
     ]
     if target_tld:
-        web_queries.append(f"site:{target_tld} {keyword} {q_loc}")
+        web_queries.append(f"site:{target_tld} {keyword} {location}")
     
     final_results = {}
     
@@ -176,12 +167,12 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                             domain = url.split("//")[-1].split("/")[0].replace("www.", "").lower()
                             score = score_candidate({"title": name, "body": snippet_el.inner_text() if snippet_el else "", "href": url}, keyword, sector, location, country)
                             
-                            # LİNKEDİN ŞİRKET FİLTRESİ (KİŞİLERİ ELER)
-                            # /in/, /people/, /pub/, /jobs/ gibi linkler şirket sayfası değildir.
+                            # LİNKEDİN ŞİRKET FİLTRESİ (KİŞİLERİ ELE)
+                            # Link içinde /in/ geçiyorsa bu bir kişidir, şirket değildir.
                             is_li = ("linkedin.com/company/" in url.lower() or "linkedin.com/school/" in url.lower())
-                            is_person = any(x in url.lower() for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/"])
+                            is_person = "/in/" in url.lower()
                             
-                            if is_person: continue # Kişisel profil veya arama sonuçlarını ele.
+                            if is_person: continue # Hasan Araba gibi kişileri direkt ele!
                             
                             if is_li: score += 200 # Şirket sayfasını en başa al
                             

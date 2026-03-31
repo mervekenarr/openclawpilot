@@ -1,0 +1,24 @@
+# ignore python byte code
+__pycache__/
+*.pyc
+
+# ignore environment files (SECURITY!)
+.env
+.env.backup
+.env.example
+
+# ignore node modules (TOO LARGE)
+node_modules/
+package-lock.json
+
+# ignore streamlit junk
+.streamlit/
+scripts/company-search/node_modules/
+scripts/linkedin-company-search/node_modules/
+scripts/company-website-read/node_modules/
+
+# ignore scratch files
+test_*.py
+scratch_*.py
+tmp/
+*.log

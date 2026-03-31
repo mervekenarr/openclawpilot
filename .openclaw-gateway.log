@@ -1,0 +1,17 @@
+2026-03-24T16:52:57.657+03:00 [canvas] host mounted at http://127.0.0.1:18789/__openclaw__/canvas/ (root C:\Users\bt.stajyer\openclawpilot\openclawpilot\.openclaw-home\.openclaw\canvas)
+2026-03-24T16:52:57.911+03:00 [heartbeat] started
+2026-03-24T16:52:57.918+03:00 [health-monitor] started (interval: 300s, startup-grace: 60s, channel-connect-grace: 120s)
+2026-03-24T16:52:57.927+03:00 [gateway] agent model: anthropic/claude-opus-4-6
+2026-03-24T16:52:57.931+03:00 [gateway] listening on ws://127.0.0.1:18789, ws://[::1]:18789 (PID 18708)
+2026-03-24T16:52:57.937+03:00 [gateway] log file: C:\Users\BTAF9D~1.STA\AppData\Local\Temp\openclaw\openclaw-2026-03-24.log
+2026-03-24T16:52:58.034+03:00 [browser/server] Browser control listening on http://127.0.0.1:18791/ (auth=token)
+2026-03-24T16:57:03.560+03:00 [gateway] device pairing auto-approved device=ee0c95f635772760186457110dd19379ba12bd4081dd869a6a45e50a75841b1d role=operator
+2026-03-24T16:59:23.384+03:00 [gateway] device pairing auto-approved device=88d8ac4c1a049544ef144126fc06c56412fa1234121b6917baf055f089e39281 role=operator
+2026-03-24T16:59:23.392+03:00 [ws] webchat connected conn=e548cc26-f1b0-4217-a8e6-39f11f415722 remote=127.0.0.1 client=openclaw-control-ui webchat v2026.3.23-2
+2026-03-24T16:59:23.592+03:00 [ws] ⇄ res ✓ sessions.list 142ms conn=e548cc26…5722 id=99117e3d…015f
+2026-03-24T16:59:27.214+03:00 [ws] ⇄ res ✓ node.list 3794ms conn=e548cc26…5722 id=8623eaa4…67b4
+2026-03-24T16:59:27.218+03:00 [ws] ⇄ res ✓ device.pair.list 3798ms conn=e548cc26…5722 id=caf90354…8b12
+2026-03-24T16:59:28.745+03:00 [ws] ⇄ res ✓ chat.history 5322ms conn=e548cc26…5722 id=929d9bd7…c195
+2026-03-24T16:59:28.751+03:00 [ws] ⇄ res ✓ models.list 5155ms conn=e548cc26…5722 id=79d8d9e3…1c00
+2026-03-24T17:08:07.583+03:00 [reload] config change detected; evaluating reload (meta.lastTouchedAt, agents.defaults.models, wizard)
+2026-03-24T17:08:07.668+03:00 [reload] config hot reload applied (agents.defaults.models)

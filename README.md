@@ -25,6 +25,7 @@ Bağımlılıkları yüklemek için terminalden şu komutu çalıştırın:
 pip install -r requirements.txt
 playwright install chromium
 ```
+*(Ya da manuel olarak: `streamlit run ops/openclaw/dashboard.py`)*
 
 ### 3. Çalıştırma
 Proje kök dizinindeki başlatıcıyı kullanabilirsiniz:
