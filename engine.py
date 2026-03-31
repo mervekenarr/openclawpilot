@@ -112,9 +112,13 @@ def score_candidate(entry, keyword, sector, location, country):
     if loc_tokens and not loc_hit:
         score -= 30 # ARTIŞ: Sapmaları (Ankara yerine İstanbul gelmesi) engellemek için ceza artırıldı
     
-    # KİŞİSEL PROFİL CEZASI (URL bazlı son kontrol)
-    if any(x in domain for x in ["/in/", "/pub/", "/people/"]):
-        score -= 100 # Şirket arıyoruz, kişileri değil.
+    # KİŞİSEL PROFİL VEYA ARAMA LİSTESİ CEZASI
+    is_bad_url = any(x in domain for x in ["/in/", "/pub/", "/people/", "/search/", "/jobs/", "lastName=", "firstName="])
+    # Eğer başlıkta 'Haktan Denizli' gibi sadece 2 kelimelik isim soyisim varsa (kurumsal takı yoksa) ceza ver
+    is_name_format = len(entry.get('title', '').split()) <= 2 and not any(t in haystack for t in INDUSTRY_TOKENS)
+    
+    if is_bad_url or is_name_format:
+        score -= 200 # Şirket arıyoruz, kişileri veya listeleri değil.
         
     return score
 
@@ -137,7 +141,8 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     ]
     li_queries = [
         f"site:linkedin.com/company/ {keyword} {q_loc} {country}",
-        f"{keyword} {q_loc} {country} official linkedin company"
+        f"site:linkedin.com/school/ {keyword} {q_loc} {country}",
+        f'"{keyword}" official linkedin company page {q_loc}' # Daha spesifik
     ]
     if target_tld:
         web_queries.append(f"site:{target_tld} {keyword} {q_loc}")
@@ -176,14 +181,14 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                             domain = url.split("//")[-1].split("/")[0].replace("www.", "").lower()
                             score = score_candidate({"title": name, "body": snippet_el.inner_text() if snippet_el else "", "href": url}, keyword, sector, location, country)
                             
-                            # LİNKEDİN ŞİRKET FİLTRESİ (KİŞİLERİ ELER)
-                            # /in/, /people/, /pub/, /jobs/ gibi linkler şirket sayfası değildir.
-                            is_li = ("linkedin.com/company/" in url.lower() or "linkedin.com/school/" in url.lower())
-                            is_person = any(x in url.lower() for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/"])
+                            # LİNKEDİN ŞİRKET FİLTRESİ (KİŞİLERİ VE ARAMA LİSTELERİNİ ELER)
+                            # Sadece doğrudan şirket/okul profillerine izin veriyoruz.
+                            is_li_profile = ("linkedin.com/company/" in url.lower() or "linkedin.com/school/" in url.lower())
+                            is_bad_li = any(x in url.lower() for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "lastname=", "firstname=", "/results/"])
                             
-                            if is_person: continue # Kişisel profil veya arama sonuçlarını ele.
+                            if is_bad_li or not is_li_profile: continue 
                             
-                            if is_li: score += 200 # Şirket sayfasını en başa al
+                            score += 200 # Temiz şirket profilini en başa al
                             
                             if url not in final_results or score > final_results[url]['score']:
                                 final_results[url] = {

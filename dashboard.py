@@ -181,9 +181,22 @@ st.markdown("""
         letter-spacing: -0.02em;
     }
     
-    /* Status Messages */
+    /* Status Messages & Alerts Contrast Fix */
     .stAlert {
         border-radius: 10px !important;
+        background-color: #EBF8FF !important; /* Soft Blue */
+        border: 1px solid #BEE3F8 !important;
+    }
+    
+    .stAlert p, .stAlert div {
+        color: #2C5282 !important; /* Deep Blue for readability */
+        font-weight: 500 !important;
+    }
+
+    /* Success Messages */
+    div[data-testid="stNotification"] {
+        background-color: #F0FFF4 !important;
+        color: #276749 !important;
     }
     
     /* Horizontal Dividers */
@@ -281,7 +294,7 @@ with st.expander("📖 Hızlı Başlangıç & Kullanım Kılavuzu", expanded=Fal
     1. **Sektör & Ürün Girin:** Sol panelden hedeflediğiniz sektörü ve ürününüzü yazın.
     2. **Lokasyon Belirleyin:** Aramanın yapılacağı ülkeyi seçin (Varsayılan: Türkiye).
     3. **Analizi Başlat:** Sistem önce Bing ve LinkedIn üzerinden şirketleri bulur.
-    4. **Yapay Zeka Skoru:** AI her şirketi inceler ve size özel satış mesajı hazırlar.
+    4. **Yapay Zeka Skoru:** AI her şirketi inceler ve profesyonel bir faaliyet raporu hazırlar.
     5. **Raporu İndir:** Sonuçları sayfa sonundaki butonla **Excel/CSV** olarak indirebilirsiniz.
     """)
 
@@ -359,17 +372,17 @@ else:
             st.error("❌ Belirlenen kriterlerde yeni şirket bulunamadı.")
             st.stop()
 
-        # --- YAPAY ZEKA ANALİZ & SATIŞ MESAJI FAZI ---
+        # --- YAPAY ZEKA ANALİZ FAZI ---
         st.divider()
-        st.subheader("🧐 Karar Destek & Kişiselleştirilmiş Satış Mesajları")
+        st.subheader("🧐 Detaylı Firma Analiz Raporları")
         analysis_area = st.container()
         
         m_str = "direct" if direct_mode else "gateway"
         g_pw = settings.get("GATEWAY_PASSWORD", "openclaw123")
 
         messages_history = [
-            {"role": "system", "content": "Sen kıdemli bir satış analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'summary' kısmına bu firmanın NE YAPTIĞINI anlatan tam olarak 2 CÜMLELİK bir özet yaz. 'sales_script' kısmına ise Dikkan Vana adına özgün bir teklif hazırla. Format: `{\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}`"},
-            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {list(found_set)}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor?' sorusuna 2 cümlelik net bir cevap ver."}
+            {"role": "system", "content": "Sen kıdemli bir iş analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'analysis' kısmına bu firmanın tam olarak NE YAPTIĞINI, hangi ürünleri ürettiğini ve uzmanlık alanlarını anlatan, profesyonel ve MADDELER HALİNDE (bullet points) detaylı bir rapor yaz. Outreach/Satış mesajı hazırlama, sadece objektif analiz yap. Format: `{\"score\": 9, \"analysis\": \"...\"}`"},
+            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {list(found_set)}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor, pazar payı ve ürünleri nedir?' sorularına maddelerle cevap ver."}
         ]
 
         # 5 ADAY ANALİZİ (İstek üzerine analiz sayısını artırdık)
@@ -384,16 +397,15 @@ else:
                         s.update(label=f"✅ {comp} incelendi", state="complete")
                     
                     # 2. AI'ya analiz ettir
-                    with st.spinner("🤖 Strateji oluşturuluyor..."):
-                        prompt = f"Şu veriye göre {comp} için satış teklifi hazırla:\n{read_res[:2500]}"
+                    with st.spinner("🤖 Derin analiz yapılıyor..."):
+                        prompt = f"Şu veriye göre {comp} için detaylı faaliyet raporu hazırla:\n{read_res[:2500]}"
                         messages_history.append({"role": "user", "content": prompt})
                         ai_ana, info = call_llm_raw(messages_history, mode=m_str, gateway_pw=g_pw, timeout=60)
                         
-                        # 3. ANALİZ KARTINI BAS (REGEX İLE JSON TEMİZLEME)
+                        # 3. ANALİZ KARTINI BAS (JSON TEMİZLEME)
                         # Varsayılan değerler (Hata durumunda)
                         f_score = 5
-                        f_summary = next((c.get("snippet", "Özet bulunamadı.") for c in w_data if c.get("company_name") == comp), "Firma bilgisi alınamadı.")
-                        f_script = "Yapay Zeka yanıt vermedi, lütfen tekrar deneyin veya bağlantıyı kontrol edin."
+                        f_analysis = next((c.get("snippet", "Detaylı analiz yapılamadı.") for c in w_data if c.get("company_name") == comp), "Firma bilgisi alınamadı.")
 
                         try:
                             if ai_ana:
@@ -401,54 +413,104 @@ else:
                                 if match:
                                     ana_json = json.loads(match.group(0))
                                     f_score = ana_json.get("score", 5)
-                                    f_summary = ana_json.get("summary", f_summary)
-                                    f_script = ana_json.get("sales_script", f_script)
+                                    f_analysis = ana_json.get("analysis", f_analysis)
                                 else:
-                                    f_summary = ai_ana if len(ai_ana) > 20 else f_summary
+                                    f_analysis = ai_ana if len(ai_ana) > 20 else f_analysis
                         except:
                             pass
 
                         col1, col2 = st.columns([1, 4])
                         col1.metric("Uygunluk", f"{f_score}/10")
-                        col2.markdown(f"**📄 Firma Özeti:** {f_summary}")
-                        
-                        st.info(f"**✉️ Özel Satış Mesajı Taslağı:**\n\n{f_script}")
-                        st.caption(f"🤖 Kaynak Bilgisi: {info}")
+                        col2.markdown(f"**🔍 Profesyonel Faaliyet Raporu:**\n\n{f_analysis}")
+                        st.caption(f"🤖 Kaynak Bilgisi & Hız: {info}")
 
                         # Rapor için veriyi sakla
                         st.session_state.current_results.append({
                             "Şirket": comp,
                             "Skor": f_score,
-                            "Özet": f_summary,
-                            "Satış Mesajı": f_script,
+                            "Detaylı Analiz": f_analysis,
                             "Kaynak": info,
                             "URL": next((data["url"] for name, data in final_map.items() if name == comp), "")
                         })
 
-        st.success("🏁 Satış analizi başarıyla tamamlandı. Raporunuz hazır!")
+        st.success("🏁 Şirket analizleri başarıyla tamamlandı. Raporunuz hazır!")
 
 # ==========================================
 # RAPOR DIŞA AKTARMA (REPORT EXPORT)
 # ==========================================
+st.divider()
+st.subheader("💾 Analiz Raporunu İndir")
+
 if st.session_state.current_results:
-    st.divider()
-    st.subheader("💾 Analiz Raporunu İndir")
-    col_dl1, col_dl2 = st.columns([1, 1])
-    
     # DataFrame Hazırlama
     df = pd.DataFrame(st.session_state.current_results)
     
+    col_dl1, col_dl2 = st.columns(2)
+    
     # CSV indirme butonu
-    csv = df.to_csv(index=False).encode('utf-8-sig')
+    csv_data = df.to_csv(index=False).encode('utf-8-sig')
     col_dl1.download_button(
-        label="📥 CSV Olarak İndir (CRM İçin)",
-        data=csv,
-        file_name=f"dikkan_satis_raporu_{sector}_{int(time.time())}.csv",
+        label="📥 CSV Olarak İndir (Sade)",
+        data=csv_data,
+        file_name=f"dikkan_raporu_{int(time.time())}.csv",
         mime='text/csv',
         use_container_width=True
     )
     
-    st.info("💡 Not: İndirdiğiniz dosyayı doğrudan Excel'e veya CRM sisteminize aktarabilirsiniz.")
+    # Excel indirme butonu
+    try:
+        import io
+        buffer = io.BytesIO()
+        # xlsxwriter motorunu kullanarak profesyonel formatlama yapıyoruz
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='AnalizSonuclari')
+            
+            workbook  = writer.book
+            worksheet = writer.sheets['AnalizSonuclari']
+            
+            # Formatlar
+            header_format = workbook.add_format({
+                'bold': True,
+                'text_wrap': True,
+                'valign': 'vcenter',
+                'fg_color': '#EC6602', # Dikkan Turuncusu
+                'font_color': '#FFFFFF',
+                'border': 1
+            })
+            
+            body_format = workbook.add_format({
+                'text_wrap': True,
+                'valign': 'top',
+                'border': 1
+            })
+
+            # Başlıkları formatla
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+            
+            # Sütun genişliklerini ayarla ve kaydırma (wrap) ekle
+            worksheet.set_column('A:A', 25, body_format) # Şirket
+            worksheet.set_column('B:B', 10, body_format) # Skor
+            worksheet.set_column('C:C', 85, body_format) # Detaylı Analiz (Genişletildi)
+            worksheet.set_column('D:D', 15, body_format) # Kaynak
+            worksheet.set_column('E:E', 40, body_format) # URL
+            
+            # Satır yüksekliğini otomatik ayarla (Metin kaydırma için)
+            worksheet.set_default_row(60)
+        
+        col_dl2.download_button(
+            label="📊 Excel Olarak İndir (Profesyonel)",
+            data=buffer.getvalue(),
+            file_name=f"dikkan_analiz_raporu_{int(time.time())}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+    except Exception as e:
+        col_dl2.error(f"Excel Hatası: {str(e)}")
+    
+    st.info("💡 Not: İndirdiğiniz dosyayı doğrudan CRM sisteminize aktarabilirsiniz.")
+else:
+    st.info("ℹ️ Rapor hazırlamak için en az bir analiz tamamlanmış olmalıdır.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("OpenClaw Pilot - Sales Assistant Pro v2.5")

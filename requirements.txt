@@ -5,3 +5,6 @@ trafilatura
 requests
 python-dotenv
 beautifulsoup4
+pandas
+openpyxl
+xlsxwriter
