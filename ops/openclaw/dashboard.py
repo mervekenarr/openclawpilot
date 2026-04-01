@@ -4,12 +4,14 @@ import json
 import time
 import requests
 import re
-from engine import search_web_companies, search_linkedin_companies, read_website_content
+from engine import search_web_companies, search_linkedin_companies, read_website_content, find_company_website
 import pandas as pd
 import io
 
 # Ayar Dosyası Yolu
 ENV_PATH = ".env"
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.trust_env = False
 
 # ==========================================
 # GÜVENLİ AYAR YÖNETİMİ
@@ -56,6 +58,13 @@ def save_secure_setting(key, value):
         
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
+
+
+def normalize_company_key(name):
+    """Farkli kaynaklardaki firma adlarini tek anahtarda toplar."""
+    raw = (name or "").split("-")[0].split("|")[0].strip().lower()
+    raw = re.sub(r"[^a-z0-9]+", " ", raw)
+    return " ".join(raw.split())
 
 settings = load_secure_settings()
 
@@ -214,7 +223,7 @@ def call_llm_raw(messages, mode="direct", gateway_pw="", timeout=20):
 
     try:
         start_t = time.time()
-        response = requests.post(url, json=payload, timeout=timeout)
+        response = HTTP_SESSION.post(url, json=payload, timeout=timeout)
         end_t = time.time()
         
         if response.status_code == 200:
@@ -292,6 +301,7 @@ else:
         st.subheader(f"📊 {sector} Ürün/Sektör Analiz Raporu")
         
         found_set = set()
+        selection_lookup = {}
         findings_area = st.container()
         log_area = st.empty()
         debug_area = st.expander("🛠️ Teknik Detaylar / Loglar")
@@ -308,13 +318,18 @@ else:
             # 1. LinkedIn Araması (Daha fazla sonuç çekip yeni olanları ayıklayacağız)
             l_data = search_linkedin_companies(product, sector, f"{selected_city} {selected_country}".strip(), session_token, limit=15)
             num_l = len(l_data) if isinstance(l_data, list) else 0
+            linkedin_status = os.getenv("OPENCLAW_LAST_LINKEDIN_STATUS", "unknown")
             
             # 2. Web Araması
             target_total = 6
-            w_limit = max(10, target_total - num_l)
-            w_data = search_web_companies(product, sector, selected_city, selected_country, limit=20)
+            w_limit = max(target_total - num_l, 0)
+            w_data = search_web_companies(product, sector, selected_city, selected_country, limit=10) if w_limit > 0 else []
             
             status.update(label=f"✅ {num_l + len(w_data)} Potansiyel Şirket Keşfedildi", state="complete")
+            if num_l == 0:
+                st.warning(f"LinkedIn şirket araması sonuç vermedi. Durum: {linkedin_status}")
+            else:
+                st.caption(f"Kaynak dağılımı: LinkedIn={num_l}, Web={len(w_data)} | LinkedIn durumu: {linkedin_status}")
             
             # Yeni bir arama başladığında eski sonuçları temizle
             st.session_state.current_results = []
@@ -328,32 +343,86 @@ else:
                     
                     is_garbage = any(x in url.lower() for x in ["/search/", "/people/", "/pub/", "/in/", "/jobs/", "/pulse/", "/posts/"])
                     if not is_garbage and "linkedin.com/company/" in url.lower():
-                        all_candidates.append({"name": c.get("company_name"), "url": url, "is_li": True})
+                        all_candidates.append({
+                            "name": c.get("company_name"),
+                            "url": url,
+                            "is_li": True,
+                            "snippet": c.get("title", ""),
+                            "score": c.get("score", 0),
+                            "candidate_website": c.get("website_url", ""),
+                            "candidate_linkedin": url,
+                        })
             
             for c in w_data:
                 url = c.get("website", "")
                 if url in st.session_state.seen_urls: continue # Hafızada varsa atla
-                all_candidates.append({"name": c.get("company_name"), "url": url, "is_li": c.get("is_linkedin", False)})
+                all_candidates.append({
+                    "name": c.get("company_name"),
+                    "url": url,
+                    "is_li": c.get("is_linkedin", False),
+                    "snippet": c.get("snippet", ""),
+                    "score": c.get("score", 0),
+                    "candidate_website": c.get("website", ""),
+                    "candidate_linkedin": "",
+                })
 
             # İSME GÖRE TEKİLLEŞTİR (Ama LİNKEDİN OLAN KAZANSIN!)
             final_map = {}
             for cand in all_candidates:
                 name = cand["name"].split("-")[0].split("|")[0].strip()
                 if not name or len(name) < 2: continue
-                if name not in final_map or (not final_map[name]["is_li"] and cand["is_li"]):
+                if name not in final_map:
                     final_map[name] = cand
+                    continue
+
+                existing = final_map[name]
+                existing["candidate_website"] = existing.get("candidate_website", "") or cand.get("candidate_website", "")
+                existing["candidate_linkedin"] = existing.get("candidate_linkedin", "") or cand.get("candidate_linkedin", "")
+                existing["snippet"] = existing.get("snippet", "") or cand.get("snippet", "")
+                existing["score"] = max(existing.get("score", 0), cand.get("score", 0))
 
             # Yeni bulunanları hafızaya ekle (Max 6 tanesini gösterip hafızaya alacağız)
-            new_selection = list(final_map.values())[:6]
+            new_selection = sorted(
+                final_map.values(),
+                key=lambda item: (
+                    0 if (item.get("candidate_website") or not item["is_li"]) else 1,
+                    0 if item["is_li"] else 1,
+                    -item.get("score", 0),
+                    item["name"].lower(),
+                ),
+            )[:6]
             for item in new_selection:
-                st.session_state.seen_urls.add(item["url"])
+                name = item["name"].split("-")[0].split("|")[0].strip()
+                item["website_url"] = item.get("candidate_website", "") or (item["url"] if not item["is_li"] else "")
+                item["linkedin_url"] = item.get("candidate_linkedin", "") or (item["url"] if item["is_li"] else "")
+                if not item["website_url"]:
+                    enriched = find_company_website(
+                        name,
+                        keyword=product,
+                        sector=sector,
+                        location=selected_city,
+                        country=selected_country,
+                    )
+                    if enriched:
+                        item["website_url"] = enriched.get("website", "")
+                        item["snippet"] = enriched.get("snippet", "") or item.get("snippet", "")
+                        item["score"] = max(item.get("score", 0), enriched.get("score", 0))
+                for url in [item["website_url"], item["linkedin_url"]]:
+                    if url:
+                        st.session_state.seen_urls.add(url)
+                selection_lookup[normalize_company_key(name)] = item
 
             for data in new_selection:
                 name = data["name"]
-                icon = "🟦" if data["is_li"] else "🌐"
-                label = "LINKEDIN" if data["is_li"] else "WEB"
-                findings_area.markdown(f"{icon} **[{label}]** {name} | [Bağlantıya Git 🔗]({data['url']})")
+                link_parts = []
+                if data.get("website_url"):
+                    link_parts.append(f"[Firma Sitesi]({data['website_url']})")
+                if data.get("linkedin_url"):
+                    link_parts.append(f"[LinkedIn]({data['linkedin_url']})")
+                findings_area.markdown(f"🌐 **{name}** | " + " | ".join(link_parts))
                 found_set.add(name)
+
+            selected_companies = [data["name"] for data in new_selection]
 
         if not found_set:
             st.error("❌ Belirlenen kriterlerde yeni şirket bulunamadı.")
@@ -369,18 +438,19 @@ else:
 
         messages_history = [
             {"role": "system", "content": "Sen kıdemli bir satış analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'summary' kısmına bu firmanın NE YAPTIĞINI anlatan tam olarak 2 CÜMLELİK bir özet yaz. 'sales_script' kısmına ise Dikkan Vana adına özgün bir teklif hazırla. Format: `{\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}`"},
-            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {list(found_set)}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor?' sorusuna 2 cümlelik net bir cevap ver."}
+            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {selected_companies}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor?' sorusuna 2 cümlelik net bir cevap ver."}
         ]
 
         # 5 ADAY ANALİZİ (İstek üzerine analiz sayısını artırdık)
-        for i, comp in enumerate(list(found_set)[:5]): 
+        for i, comp in enumerate(selected_companies[:5]): 
             with analysis_area:
                 with st.expander(f"📌 Analiz ve Teklif: {comp}", expanded=True):
                     # 1. Siteyi bul ve içeriği al
                     with st.status(f"🌐 {comp} araştırılıyor...", expanded=False) as s:
+                        company_data = selection_lookup.get(normalize_company_key(comp), {})
                         # Eğer LinkedIn URL ise oradan okumaya çalışmaz, sadece metadata gösterir
                         # Ama biz genel olarak search_web_companies'den gelen URL'leri tercih ederiz
-                        read_res = read_website_content(next((c.get("website") for c in w_data if c.get("company_name") == comp), ""))
+                        read_res = read_website_content(company_data.get("website_url", ""))
                         s.update(label=f"✅ {comp} incelendi", state="complete")
                     
                         # 2. AI'ya analiz ettir
@@ -392,7 +462,7 @@ else:
                             # 3. ANALİZ KARTINI BAS (REGEX İLE JSON TEMİZLEME)
                             # Varsayılan değerler (Hata durumunda)
                             f_score = 5
-                            f_summary = next((c.get("snippet", "Özet bulunamadı.") for c in w_data if c.get("company_name") == comp), "Firma bilgisi alınamadı.")
+                            f_summary = company_data.get("snippet", "") or company_data.get("website_url") or company_data.get("linkedin_url") or "Firma bilgisi alınamadı."
                             f_script = "Yapay Zeka yanıt vermedi, lütfen tekrar deneyin veya bağlantıyı kontrol edin."
 
                             try:
@@ -422,7 +492,9 @@ else:
                             "Özet": f_summary,
                             "Satış Mesajı": f_script,
                             "Kaynak": info,
-                            "URL": next((data["url"] for name, data in final_map.items() if name == comp), "")
+                            "Website": company_data.get("website_url", ""),
+                            "LinkedIn": company_data.get("linkedin_url", ""),
+                            "URL": company_data.get("website_url") or company_data.get("linkedin_url") or ""
                         })
 
         st.success("🏁 Satış analizi başarıyla tamamlandı. Raporunuz hazır!")
