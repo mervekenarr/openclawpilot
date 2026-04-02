@@ -1,53 +1,47 @@
-# 🤖 AI Satış Asistanı & Şirket Analisti (Pro v2.5)
+# AI Satis Asistani & Sirket Analisti
 
-Bu proje, satış ekiplerinin pazar araştırması, rakip analizi ve aday müşteri (prospekt) bulma süreçlerini tamamen otomatize eden, Python tabanlı profesyonel bir yapay zeka aracıdır.
+Bu proje, satis ekiplerinin sirket kesfi, on eleme ve kisisellestirilmis teklif hazirlama akislarini yerelde calistiran bir Streamlit uygulamasidir.
 
----
+Kodun tek kanonik kopyasi `ops/openclaw` altindadir.
+Kokteki `dashboard.py`, `engine.py` ve `setup_openclaw.py` dosyalari bu klasore yonlendiren ince wrapper dosyalaridir.
 
-## 🔥 Temel Özellikler
+## Hizli Baslangic
 
-- **⚡ Smart Start (Hibrit Keşif)**: Bing, DuckDuckGo ve LinkedIn ağını aynı anda tarayarak en güncel şirket listelerini saniyeler içinde oluşturur.
-- **🧐 AI Karar Destek (0-10 Uygunluk Skoru)**: Yapay zeka, bulunan her şirketin web sitesine girer, içeriği okur ve belirlediğiniz ürün/sektörle ne kadar uyumlu olduğunu puanlar.
-- **📄 Akıllı Şirket Özeti**: Her aday firmanın ne iş yaptığını ve hangi sektörlere odaklandığını tek cümlede raporlar.
-- **✉️ Kişiselleştirilmiş Satış Mesajları**: AI, her firma için o firmaya özel, "kanca" cümleler (Hook) barındıran satış teklifi taslakları hazırlar.
-- **🛡️ Güvenli & Yerel Veri**: Tüm analizler yerel ağınızda (Ollama) gerçekleşir; verileriniz dışarı sızmaz.
+1. Python bagimliliklarini kurun:
 
-## 🚀 Hızlı Başlangıç
-
-### 1. Gereksinimler
-- **Python 3.10+**
-- **Ollama** (LLM Sunucusu - `qwen2.5:3b` modeli yüklü olmalıdır)
-- **LinkedIn li_at Token** (LinkedIn aramaları için opsiyoneldir, `.env` dosyasına eklenir)
-
-### 2. Kurulum
-Bağımlılıkları yüklemek için terminalden şu komutu çalıştırın:
 ```bash
-pip install -r requirements.txt
-playwright install chromium
+py setup_openclaw.py
 ```
-*(Ya da manuel olarak: `streamlit run ops/openclaw/dashboard.py`)*
 
-### 3. Çalıştırma
-Proje kök dizinindeki başlatıcıyı kullanabilirsiniz:
+2. Uygulamayi baslatin:
+
 ```text
 AnaliziBaslat.bat
 ```
-*(Ya da manuel olarak: `streamlit run ops/openclaw/dashboard.py`)*
 
-## 🏗️ Proje Yapısı
+Isterseniz Streamlit'i dogrudan da baslatabilirsiniz:
 
-- **`dashboard.py`**: Modern ve kullanıcı dostu Streamlit arayüzü.
-- **`engine.py`**: Arama, web kazıma ve puanlama yapan ana Python motoru.
-- **`setup_openclaw.py`**: İlk kurulum ve yapılandırma sihirbazı.
-- **`AnaliziBaslat.bat`**: Kullanıcı dostu tek tıkla başlatma dosyası.
+```bash
+py -m streamlit run dashboard.py
+```
 
----
+## Gereksinimler
 
-## 🛠️ Teknik Detaylar
-- **UI**: Streamlit
-- **Search Engine**: Playwright (Geçici Tarayıcı Otomasyonu) + HTTP Scrapers
-- **AI Model**: Ollama / Qwen 2.5 (3B / 7B / 14B destekler)
-- **Veri Okuma**: Trafilatura (Hızlı ve Temiz Metin Ekstraksiyonu)
+- Python 3.10+
+- Ollama
+- Opsiyonel LinkedIn `li_at` oturum cerezi
 
----
-*OpenClaw Pilot Proje - Geleceğin Satış Otomasyonu Çözümleri*
+`setup_openclaw.py`, gerekli Python paketlerini ve Playwright Chromium kurulumunu yapar.
+Kurulum sirasinda `ops/openclaw/.env` dosyasi olusturulur veya mevcutsa korunur.
+
+## Proje Yapisi
+
+- `ops/openclaw/dashboard.py`: kanonik Streamlit arayuzu
+- `ops/openclaw/engine.py`: arama, filtreleme ve veri toplama motoru
+- `ops/openclaw/setup_openclaw.py`: kurulum sihirbazi
+- `AnaliziBaslat.bat`: uygulama baslaticisi
+
+## Notlar
+
+- Kokteki wrapper dosyalari, eski dokuman ve komutlari bozmadan tek kaynak kod duzenini korumak icindir.
+- `runtime-workspace` klasoru calisma zamani artefaktlari icin tutulur; uygulamanin esas kaynak kodu degildir.

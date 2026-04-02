@@ -1,15 +1,19 @@
 import os
 import json
+import html
 import re
 import sys
 import asyncio
 import base64
+import time
+import shutil
 import subprocess
+import xml.etree.ElementTree as ET
 import requests
 import trafilatura
 from playwright.sync_api import sync_playwright
 from pathlib import Path
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
 
 # Windows üzerinde Playwright ve Asyncio çakışmasını önlemek için Proactor policy ayarı
@@ -20,6 +24,16 @@ if sys.platform == 'win32':
 # Gerekirse .env veya ortam degiskeni ile OPENCLAW_DISABLE_PLAYWRIGHT=1 yapilarak kapatilabilir.
 PLAYWRIGHT_DISABLED = os.getenv("OPENCLAW_DISABLE_PLAYWRIGHT", "").strip() == "1"
 PLAYWRIGHT_WAIT_UNTIL = (os.getenv("OPENCLAW_PLAYWRIGHT_WAIT_UNTIL", "networkidle").strip() or "networkidle")
+PLAYWRIGHT_RUNTIME_FAILED = False
+OPENCLAW_LINKEDIN_BROWSER_ENABLED = os.getenv("OPENCLAW_LINKEDIN_BROWSER", "").strip() == "1"
+SEARCH_RESULT_CACHE = {}
+BRAVE_BACKOFF_UNTIL = 0.0
+BRAVE_FAILURE_COUNT = 0
+DDG_BACKOFF_UNTIL = 0.0
+DDG_FAILURE_COUNT = 0
+SEARCH_HTTP_TIMEOUT = 4
+VERIFY_HTTP_TIMEOUT = 4
+LINKEDIN_HTTP_TIMEOUT = 5
 
 # ==========================================
 # GÜVENLİK VE FİLTRELEME (AYIRICILAR)
@@ -58,6 +72,45 @@ COMPANY_HINT_TOKENS = [
     "about us", "enterprise", "group", "holding", "inc", "ltd", "llc"
 ]
 
+SELLER_HINT_TOKENS = [
+    "manufacturer", "supplier", "distributor", "dealer", "reseller", "wholesaler",
+    "vendor", "stockist", "exporter", "integrator", "producer", "oem", "maker",
+    "authorized", "dealer", "partner", "bayi", "tedarik", "tedarikci", "satici",
+    "satis", "distributoru", "distributoru", "uretim", "uretici", "imalat"
+]
+
+ARTICLEISH_TOKENS = [
+    "news", "article", "blog", "guide", "what is", "nedir", "how to", "manual",
+    "datasheet", "whitepaper", "policy", "forum", "career", "careers", "jobs",
+    "job", "press release", "press", "support", "documentation", "docs", "kb"
+]
+
+NON_COMPANY_HOST_TOKENS = [
+    "gov.uk", ".gov", ".edu", "medium.com", "substack.com", "wikipedia.org",
+    "support.", "docs.", "help.", "learn.", "forum.", "blog.", "europages.",
+    "environmental-expert.", "thomasnet.", "made-in-china.", "exporthub."
+]
+
+DIRECTORYISH_TOKENS = [
+    "business directory", "supplier directory", "manufacturers directory",
+    "manufacturer directory", "company profile", "company listing", "company listings",
+    "b2b directory", "b2b marketplace", "marketplace", "buyers guide", "buyer guide",
+    "find suppliers", "find supplier", "find manufacturers", "find manufacturer",
+    "verified suppliers", "companies and suppliers", "supplier of", "suppliers of"
+]
+
+COMPANY_PAGE_HINT_TOKENS = [
+    "about us", "about company", "our company", "hakkimizda", "kurumsal",
+    "contact us", "iletisim", "products", "urunler", "services", "solutions"
+]
+
+NOISY_NAME_TOKENS = [
+    "linkedin", "linkedin com", "official site", "official website", "company profile",
+    "company page", "search results", "manufacturer", "supplier", "distributor",
+    "reseller", "dealer", "homepage", "home page", "products", "services",
+    "solutions", "overview", "category", "categories", "industrial", "industry"
+]
+
 INDUSTRY_TOKENS = [
     "industry", "industrial", "manufacturing", "supplier", "manufacturer", 
     "corporation", "limited", "ltd", "inc", "group", "holding", "services", 
@@ -80,9 +133,65 @@ ISO_COUNTRY_MAP = {
 }
 
 TLD_MAP = {
+    "turkiye": ".tr", "turkey": ".tr", "tr": ".tr",
     "germany": ".de", "almanya": ".de", "france": ".fr", "fransa": ".fr",
     "italy": ".it", "italya": ".it", "uk": ".co.uk", "usa": ".com"
 }
+
+COUNTRY_ALIAS_MAP = {
+    "TR": ["turkiye", "turkey", "tuerkei", "turkei"],
+    "DE": ["germany", "almanya", "deutschland", "deutsch"],
+    "GB": ["uk", "united kingdom", "england", "britain", "great britain"],
+    "US": ["usa", "united states", "america", "us"],
+    "FR": ["france", "fransa", "francais"],
+    "IT": ["italy", "italya", "italia"],
+    "ES": ["spain", "ispanya", "espana"],
+    "NL": ["netherlands", "hollanda", "nederland"],
+    "PL": ["poland", "polonya", "polska"],
+    "CN": ["china", "cin", "zhongguo", "prc"],
+}
+
+COUNTRY_QUERY_TERM_MAP = {
+    "DE": ["hersteller", "lieferant", "unternehmen", "kontakt", "uber uns", "standorte", "vertriebspartner", "handler"],
+    "FR": ["fabricant", "fournisseur", "entreprise", "contact", "a propos", "implantations", "distributeur"],
+    "IT": ["produttore", "fornitore", "azienda", "contatti", "chi siamo", "sedi", "distributore"],
+    "ES": ["fabricante", "proveedor", "empresa", "contacto", "sobre nosotros", "ubicaciones", "distribuidor"],
+    "NL": ["fabrikant", "leverancier", "bedrijf", "contact", "over ons", "locaties", "distributeur"],
+    "PL": ["producent", "dostawca", "firma", "kontakt", "o nas", "lokalizacje", "dystrybutor"],
+    "TR": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "kurumsal", "iletisim"],
+}
+
+COUNTRY_CALLING_CODE_MAP = {
+    "TR": ["+90", "0090"],
+    "DE": ["+49", "0049"],
+    "GB": ["+44", "0044"],
+    "US": ["+1", "001"],
+    "FR": ["+33", "0033"],
+    "IT": ["+39", "0039"],
+    "ES": ["+34", "0034"],
+    "NL": ["+31", "0031"],
+    "PL": ["+48", "0048"],
+    "CN": ["+86", "0086"],
+}
+
+LOCATION_PAGE_HINT_TOKENS = [
+    "contact", "contact us", "contacto", "contatti", "kontakt", "iletisim",
+    "location", "locations", "locaties", "standorte", "implantations", "sedi",
+    "where to buy", "where-to-buy", "dealer", "dealers", "distributor", "distributors",
+    "branch", "branches", "office", "offices", "store", "stores", "showroom",
+    "warehouse", "warehouses", "service", "services", "network", "global network",
+    "bayi", "bayiler", "sube", "subeler", "ofis", "ofisler", "temsilci", "temsilcilik",
+]
+
+LOCATION_ROLE_HINT_TOKENS = [
+    "branch", "office", "offices", "dealer", "dealers", "distributor", "distributors",
+    "partner", "partners", "warehouse", "service", "showroom", "head office", "headquarter",
+    "facility", "plant", "factory", "subsidiary", "country office", "regional office",
+    "bayi", "bayiler", "sube", "subeler", "ofis", "depo", "servis", "temsilci", "temsilcilik",
+    "niederlassung", "vertretung", "handler", "agence", "filiale", "sede", "rivenditore",
+]
+
+OPENCLAW_SITE_BROWSE_READY = None
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -93,10 +202,12 @@ DEFAULT_HEADERS = {
 
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.trust_env = False
+HTTP_SESSION.headers.update(DEFAULT_HEADERS)
 
 OPENCLAW_HOME = Path(__file__).resolve().parents[2] / ".openclaw-home"
 OPENCLAW_CONFIG_PATH = OPENCLAW_HOME / "openclaw.json"
 OPENCLAW_COMMAND_TIMEOUT_MS = 90000
+OPENCLAW_ATTACH_PROFILE_DIR = OPENCLAW_HOME / "chrome-profile"
 
 LEGAL_SUFFIX_TOKENS = {
     "as", "a", "s", "a.s", "ltd", "sti", "sti.", "limited", "inc", "llc",
@@ -104,6 +215,15 @@ LEGAL_SUFFIX_TOKENS = {
     "group", "holding", "san", "tic", "ve", "anonim", "sirketi", "sirket",
     "corporation"
 }
+
+DIRECTORY_HOST_TOKENS = [
+    "yellowpages.", "kompass.", "zoominfo.", "rocketreach.", "signalhire.",
+    "apollo.io", "dnb.com", "bloomberg.com", "crunchbase.com", "glassdoor.",
+    "clutch.co", "craft.co", "cylex.", "hotfrog.", "2findlocal.", "yelp.",
+    "mapquest.com", "zaubacorp.com", "pitchbook.com", "tracxn.com", "aihitdata.com",
+    "europages.", "environmental-expert.", "thomasnet.", "made-in-china.",
+    "globalsources.", "exporthub.", "businesslist.", "yelu.", "industrystock."
+]
 
 def fold_text(text):
     """Karakter temizleme ve normalize etme (Türkçe dahil)."""
@@ -134,6 +254,141 @@ def is_allowed_domain(url):
 def build_query(*parts):
     """Boş parçaları eleyip okunabilir arama cümlesi oluşturur."""
     return " ".join(str(part).strip() for part in parts if str(part).strip())
+
+
+def country_code_for(country):
+    """Normalize user country input to a compact ISO-like code when possible."""
+    return ISO_COUNTRY_MAP.get(fold_text(country), "")
+
+
+def country_alias_tokens(country):
+    """Return normalized aliases that may appear on websites for the target country."""
+    country_fold = fold_text(country)
+    code = country_code_for(country)
+    aliases = {country_fold} if country_fold else set()
+    if code:
+        aliases.update(fold_text(alias) for alias in COUNTRY_ALIAS_MAP.get(code, []))
+    return {alias for alias in aliases if alias}
+
+
+def country_tld_for(country):
+    """Resolve a likely country-level domain suffix for search/query boosts."""
+    folded = fold_text(country)
+    target_tld = TLD_MAP.get(folded, "")
+    if target_tld:
+        return target_tld
+    code = country_code_for(country)
+    return f".{code.lower()}" if code else ""
+
+
+def country_query_terms(country):
+    """Country-specific company/seller terms for better foreign-language discovery."""
+    code = country_code_for(country)
+    return COUNTRY_QUERY_TERM_MAP.get(code, [])
+
+
+def country_location_tokens(country):
+    """Signals that often prove country presence on the website itself."""
+    code = country_code_for(country)
+    tokens = set(country_alias_tokens(country))
+    if code:
+        tokens.update(token.lower() for token in COUNTRY_CALLING_CODE_MAP.get(code, []))
+        tokens.add(f"/{code.lower()}/")
+        tokens.add(f"-{code.lower()}/")
+        tokens.add(f"lang={code.lower()}")
+        tokens.add(f"locale={code.lower()}")
+    target_tld = country_tld_for(country)
+    if target_tld:
+        tokens.add(target_tld)
+    return {token for token in tokens if token}
+
+
+def clean_company_name(name):
+    """Arama motoru başlıklarından temiz firma adı üretir."""
+    text = (name or "").strip()
+    if not text:
+        return ""
+    text = re.split(r"\s+[|•·]\s+|\s+-\s+", text, maxsplit=1)[0].strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def is_plausible_company_name(name):
+    """Şirket adı gibi görünmeyen şema / sınıf isimlerini eler."""
+    text = (name or "").strip()
+    low = text.lower()
+    if not text:
+        return False
+    if low.startswith("com.linkedin") or low.startswith("urn:li:"):
+        return False
+    if text.count(".") >= 2:
+        return False
+    if any(token in low for token in ["$type", "validationmetadata", "graphql", "collectionresponse", "voyager.dash"]):
+        return False
+    return True
+
+
+def is_linkedin_company_url(url):
+    """LinkedIn şirket / okul URL'lerini ayıklar."""
+    lower_url = (url or "").lower()
+    return "linkedin.com/company/" in lower_url or "linkedin.com/school/" in lower_url
+
+
+def normalize_linkedin_company_url(url):
+    """LinkedIn entity URL'lerini tek biçime indirger."""
+    clean_url = unwrap_search_result_url(url)
+    if not clean_url:
+        return ""
+
+    try:
+        parsed = urlparse(clean_url)
+    except Exception:
+        return ""
+
+    if "linkedin.com" not in parsed.netloc.lower():
+        return ""
+
+    match = re.search(r"/(company|school)/([^/?#]+)/?", parsed.path, re.IGNORECASE)
+    if not match:
+        return ""
+
+    entity_type = match.group(1).lower()
+    slug = match.group(2).strip()
+    if not slug:
+        return ""
+
+    return f"https://www.linkedin.com/{entity_type}/{slug}/"
+
+
+def host_is_directory(url):
+    """Firma sitesi yerine rehber/dizin/profil toplayıcısı olan host'ları ayıklar."""
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    return any(token in host for token in DIRECTORY_HOST_TOKENS)
+
+
+def url_looks_like_asset(url):
+    """PDF / görsel / dosya uzantılarını firma sitesi olarak seçme."""
+    path = urlparse(url or "").path.lower()
+    return any(
+        path.endswith(ext)
+        for ext in [".pdf", ".jpg", ".jpeg", ".png", ".svg", ".zip", ".doc", ".docx", ".xls", ".xlsx"]
+    )
+
+
+def linkedin_status_label(prefix, detail=""):
+    """Kısa ve okunabilir durum etiketi üretir."""
+    return f"{prefix}:{detail}" if detail else prefix
+
+
+def can_use_playwright():
+    """Bu oturumda Playwright kullanılabilir mi?"""
+    return not PLAYWRIGHT_DISABLED and not PLAYWRIGHT_RUNTIME_FAILED
+
+
+def mark_playwright_failed(exc):
+    """Playwright bir kez patlarsa oturum için kapat."""
+    global PLAYWRIGHT_RUNTIME_FAILED
+    PLAYWRIGHT_RUNTIME_FAILED = True
+    print(f"Playwright runtime kapatildi: {exc}")
 
 
 def goto_with_fallback(page, url, timeout=40000):
@@ -171,10 +426,152 @@ def parse_cli_json_output(text):
     raise ValueError(f"JSON parse edilemedi: {raw[:200]}")
 
 
+def resolve_openclaw_command():
+    """Windows PATH farkliliklarinda OpenClaw CLI yolunu bul."""
+    candidates = []
+
+    env_candidate = os.getenv("OPENCLAW_BIN", "").strip()
+    if env_candidate:
+        candidates.append(env_candidate)
+
+    for name in ["openclaw", "openclaw.cmd", "openclaw.ps1"]:
+        resolved = shutil.which(name)
+        if resolved:
+            candidates.append(resolved)
+
+    appdata = os.getenv("APPDATA", "")
+    if appdata:
+        candidates.extend([
+            os.path.join(appdata, "npm", "openclaw.cmd"),
+            os.path.join(appdata, "npm", "openclaw"),
+            os.path.join(appdata, "npm", "openclaw.ps1"),
+        ])
+
+    seen = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        normalized = os.path.normcase(os.path.abspath(candidate))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if os.path.exists(candidate):
+            return candidate
+
+    return "openclaw"
+
+
+def load_openclaw_config():
+    """OpenClaw config dosyasini güvenli biçimde oku."""
+    if not OPENCLAW_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def openclaw_browser_runtime(status=None):
+    """Attach/browser bootstrap için gerekli runtime ayarlarini topla."""
+    status = status or {}
+    cfg = load_openclaw_config()
+    browser_cfg = cfg.get("browser", {}) if isinstance(cfg.get("browser"), dict) else {}
+    profiles_cfg = browser_cfg.get("profiles", {}) if isinstance(browser_cfg.get("profiles"), dict) else {}
+    profile_name = str(status.get("profile") or "openclaw")
+    profile_cfg = profiles_cfg.get(profile_name, {}) if isinstance(profiles_cfg.get(profile_name), dict) else {}
+
+    cdp_port = status.get("cdpPort") or profile_cfg.get("cdpPort") or browser_cfg.get("cdpPort") or 18800
+    try:
+        cdp_port = int(cdp_port)
+    except Exception:
+        cdp_port = 18800
+
+    executable_path = (
+        status.get("executablePath")
+        or browser_cfg.get("executablePath")
+        or status.get("detectedExecutablePath")
+        or ""
+    )
+    if executable_path and not os.path.exists(executable_path):
+        executable_path = ""
+
+    attach_only = bool(
+        status.get("attachOnly")
+        or profile_cfg.get("attachOnly")
+        or browser_cfg.get("attachOnly")
+    )
+
+    return {
+        "profile_name": profile_name,
+        "cdp_port": cdp_port,
+        "executable_path": executable_path,
+        "attach_only": attach_only,
+    }
+
+
+def openclaw_cdp_http_ready(cdp_port):
+    """Chrome debug port cevap veriyor mu?"""
+    try:
+        resp = HTTP_SESSION.get(f"http://127.0.0.1:{int(cdp_port)}/json/version", timeout=1.5)
+        return resp.ok and "webSocketDebuggerUrl" in (resp.text or "")
+    except Exception:
+        return False
+
+
+def start_openclaw_attach_browser(status=None):
+    """AttachOnly modunda OpenClaw'ın baglanacagi Chrome'u dogrudan baslat."""
+    runtime = openclaw_browser_runtime(status)
+    if not runtime.get("attach_only"):
+        return False
+
+    cdp_port = runtime.get("cdp_port", 18800)
+    if openclaw_cdp_http_ready(cdp_port):
+        return True
+
+    executable_path = runtime.get("executable_path", "")
+    if not executable_path:
+        print("OpenClaw attach browser yolu bulunamadi.")
+        return False
+
+    OPENCLAW_ATTACH_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        executable_path,
+        f"--remote-debugging-port={cdp_port}",
+        f"--user-data-dir={OPENCLAW_ATTACH_PROFILE_DIR}",
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-popup-blocking",
+    ]
+
+    try:
+        popen_kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        subprocess.Popen(cmd, **popen_kwargs)
+    except Exception as exc:
+        print(f"OpenClaw attach browser acilamadi: {exc}")
+        return False
+
+    for _ in range(20):
+        time.sleep(0.5)
+        if openclaw_cdp_http_ready(cdp_port):
+            return True
+    return False
+
+
 def run_openclaw_cli(args, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS, expect_json=True):
     """OpenClaw CLI komutunu JSON veya metin cikti ile calistirir."""
+    command = resolve_openclaw_command()
     completed = subprocess.run(
-        ["openclaw", *args],
+        [command, *args],
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -206,18 +603,48 @@ def ensure_openclaw_browser_started():
     status = openclaw_browser_available()
     if not status:
         return None
-    if status.get("running"):
+    if status.get("running") or status.get("cdpReady"):
         return status
+    runtime = openclaw_browser_runtime(status)
+    if runtime.get("attach_only"):
+        if start_openclaw_attach_browser(status):
+            refreshed = openclaw_browser_available()
+            if refreshed and (refreshed.get("running") or refreshed.get("cdpReady")):
+                return refreshed
+        print("OpenClaw attach browser hazir degil.")
+        return None
     try:
         return run_openclaw_cli(["browser", "--json", "start"], timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
     except Exception as exc:
+        if "spawn EPERM" in str(exc) and start_openclaw_attach_browser(status):
+            refreshed = openclaw_browser_available()
+            if refreshed and (refreshed.get("running") or refreshed.get("cdpReady")):
+                return refreshed
         print(f"OpenClaw browser baslatilamadi: {exc}")
         return None
 
 
+def run_openclaw_browser_cli(args, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS, expect_json=True):
+    """Browser komutlarini attach/start fallback ile güvenli sekilde calistir."""
+    global OPENCLAW_SITE_BROWSE_READY
+    status = ensure_openclaw_browser_started()
+    if not status:
+        raise RuntimeError("OpenClaw browser hazir degil")
+    try:
+        return run_openclaw_cli(args, timeout_ms=timeout_ms, expect_json=expect_json)
+    except Exception as exc:
+        message = str(exc).lower()
+        if "not running" in message or "attachonly" in message or "cdp" in message:
+            OPENCLAW_SITE_BROWSE_READY = None
+            status = ensure_openclaw_browser_started()
+            if status:
+                return run_openclaw_cli(args, timeout_ms=timeout_ms, expect_json=expect_json)
+        raise
+
+
 def openclaw_browser_open(url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS):
     """Yeni sekmede URL acar ve tab bilgisini dondurur."""
-    return run_openclaw_cli(["browser", "--json", "open", url], timeout_ms=timeout_ms)
+    return run_openclaw_browser_cli(["browser", "--json", "open", url], timeout_ms=timeout_ms)
 
 
 def openclaw_browser_close(target_id):
@@ -244,7 +671,7 @@ def openclaw_browser_wait(target_id=None, selector=None, text=None, load=None, t
     if target_id:
         args.extend(["--target-id", str(target_id)])
     args.extend(["--timeout-ms", str(timeout_ms)])
-    return run_openclaw_cli(args, timeout_ms=timeout_ms + 5000)
+    return run_openclaw_browser_cli(args, timeout_ms=timeout_ms + 5000)
 
 
 def openclaw_browser_navigate(target_id, url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS):
@@ -252,7 +679,7 @@ def openclaw_browser_navigate(target_id, url, timeout_ms=OPENCLAW_COMMAND_TIMEOU
     args = ["browser", "--json", "navigate", url]
     if target_id:
         args.extend(["--target-id", str(target_id)])
-    return run_openclaw_cli(args, timeout_ms=timeout_ms)
+    return run_openclaw_browser_cli(args, timeout_ms=timeout_ms)
 
 
 def openclaw_browser_evaluate(target_id, fn, timeout_ms=30000):
@@ -260,8 +687,106 @@ def openclaw_browser_evaluate(target_id, fn, timeout_ms=30000):
     args = ["browser", "--json", "evaluate", "--fn", fn]
     if target_id:
         args.extend(["--target-id", str(target_id)])
-    result = run_openclaw_cli(args, timeout_ms=timeout_ms)
+    result = run_openclaw_browser_cli(args, timeout_ms=timeout_ms)
     return result.get("result", result)
+
+
+def openclaw_browser_capture_page(target_id, timeout_ms=20000):
+    """Basit bir HTML/text snapshot alir; parser'ı zorlayan JS kullanmaz."""
+    snapshot_js = """function () {
+        return {
+            url: location.href,
+            title: document.title || '',
+            html: document.documentElement ? document.documentElement.outerHTML : '',
+            text: document.body && document.body.innerText ? document.body.innerText : ''
+        };
+    }"""
+    result = openclaw_browser_evaluate(target_id, snapshot_js, timeout_ms=timeout_ms)
+    if isinstance(result, dict):
+        return result
+    return {
+        "url": "",
+        "title": "",
+        "html": str(result or ""),
+        "text": "",
+    }
+
+
+def openclaw_site_browse_ready():
+    """Memoize whether OpenClaw site crawling is actually usable in this runtime."""
+    global OPENCLAW_SITE_BROWSE_READY
+    if OPENCLAW_SITE_BROWSE_READY is True:
+        return OPENCLAW_SITE_BROWSE_READY
+
+    status = ensure_openclaw_browser_started()
+    OPENCLAW_SITE_BROWSE_READY = bool(
+        status and (status.get("running") or status.get("pid") or status.get("cdpReady"))
+    )
+    return OPENCLAW_SITE_BROWSE_READY
+
+
+def openclaw_fetch_page_snapshot(url, require_host=""):
+    """Fetch page text and links via OpenClaw when the browser can be started."""
+    if not openclaw_site_browse_ready():
+        return None
+
+    opened = None
+    try:
+        opened = openclaw_browser_open(url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
+        target_id = opened.get("targetId") or opened.get("id")
+        if not target_id:
+            return None
+
+        openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
+        openclaw_browser_wait(target_id=target_id, time_ms=1800, timeout_ms=4000)
+
+        snapshot_js = r"""() => {
+            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
+            const toAbs = (href) => {
+                try {
+                    return new URL(href, location.href).href;
+                } catch (err) {
+                    return '';
+                }
+            };
+            const links = Array.from(document.querySelectorAll('a[href]')).map((anchor) => ({
+                url: toAbs(anchor.getAttribute('href') || anchor.href || ''),
+                text: clean(anchor.textContent || anchor.getAttribute('aria-label') || anchor.title || ''),
+            })).filter((row) => row.url && /^https?:/i.test(row.url)).slice(0, 160);
+            const locationBlocks = Array.from(document.querySelectorAll(
+                'address, footer, [class*="contact"], [class*="location"], [class*="office"], [class*="branch"], [class*="dealer"], [class*="distributor"], [id*="contact"], [id*="location"], [id*="office"], [id*="branch"], [itemprop="address"], [itemprop="addressCountry"]'
+            )).map((node) => clean(node.innerText)).filter(Boolean).slice(0, 12);
+            const meta = Array.from(document.querySelectorAll('meta[name], meta[property]'))
+                .map((node) => clean(`${node.getAttribute('name') || node.getAttribute('property') || ''} ${node.getAttribute('content') || ''}`))
+                .filter(Boolean)
+                .slice(0, 60);
+            const jsonld = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
+                .map((node) => clean(node.textContent || ''))
+                .filter(Boolean)
+                .slice(0, 10);
+            return {
+                url: location.href,
+                title: clean(document.title),
+                text: clean(document.body?.innerText || '').slice(0, 4200),
+                lang: clean(document.documentElement?.lang || ''),
+                locationText: clean([...locationBlocks, ...meta, ...jsonld].join(' ')).slice(0, 2200),
+                links,
+            };
+        }"""
+
+        snapshot = openclaw_browser_evaluate(target_id, snapshot_js, timeout_ms=25000) or {}
+        final_url = snapshot.get("url", "") or url
+        final_host = urlparse(final_url).netloc.lower().replace("www.", "")
+        if require_host and final_host != require_host:
+            return None
+        if not snapshot.get("title") and not snapshot.get("text"):
+            return None
+        return snapshot
+    except Exception:
+        return None
+    finally:
+        if opened:
+            openclaw_browser_close(opened.get("targetId") or opened.get("id"))
 
 
 def set_openclaw_linkedin_cookie(li_at):
@@ -269,7 +794,7 @@ def set_openclaw_linkedin_cookie(li_at):
     if not li_at:
         return False
     try:
-        run_openclaw_cli(
+        run_openclaw_browser_cli(
             ["browser", "--json", "cookies", "set", "li_at", li_at, "--url", "https://www.linkedin.com/"],
             timeout_ms=30000,
         )
@@ -325,10 +850,16 @@ def normalize_company_site_url(url):
     if not host:
         return ""
 
+    if "linkedin.com" in host:
+        return ""
+
     if host.endswith(".gov") or ".gov." in host or host.endswith(".edu") or ".edu." in host:
         return ""
 
     if any(host.startswith(f"{prefix}.") for prefix in BAD_SUBDOMAIN_PREFIXES):
+        return ""
+
+    if host_is_directory(url) or url_looks_like_asset(url):
         return ""
 
     scheme = parsed.scheme or "https"
@@ -354,19 +885,102 @@ def looks_like_company_result(title, snippet, url, is_li=False):
     return True
 
 
+def looks_like_article_or_info_page(title, snippet, url):
+    """Haber, makale, dokuman veya resmi bilgi sayfalarını eler."""
+    haystack = fold_text(f"{title} {snippet} {url}")
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    path = urlparse(url or "").path.lower()
+    if any(token in host for token in NON_COMPANY_HOST_TOKENS):
+        return True
+    if any(token in path for token in BAD_PATH_TOKENS):
+        return True
+    return any(token in haystack for token in ARTICLEISH_TOKENS)
+
+
+def seller_intent_score(text):
+    """Metnin satıcı/üretici niyetini puanlar."""
+    haystack = fold_text(text)
+    score = 0
+    if any(token in haystack for token in SELLER_HINT_TOKENS):
+        score += 20
+    if any(token in haystack for token in COMPANY_HINT_TOKENS):
+        score += 12
+    if any(token in haystack for token in INDUSTRY_TOKENS):
+        score += 8
+    if looks_like_article_or_info_page("", haystack, haystack):
+        score -= 40
+    return score
+
+
+def verify_company_homepage(candidate, keyword, sector, location="", country=""):
+    """Aday domainin gerçekten şirket sitesi olup olmadığını kontrol eder."""
+    website_url = normalize_company_site_url(candidate.get("website", ""))
+    if not website_url:
+        return None
+    if looks_like_article_or_info_page(candidate.get("company_name", ""), candidate.get("snippet", ""), website_url):
+        return None
+
+    try:
+        resp = HTTP_SESSION.get(website_url, timeout=10, allow_redirects=True)
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    final_url = normalize_company_site_url(resp.url or website_url)
+    if not final_url or looks_like_article_or_info_page(candidate.get("company_name", ""), candidate.get("snippet", ""), final_url):
+        return None
+
+    html_doc = resp.text or ""
+    soup = BeautifulSoup(html_doc, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    body_text = trafilatura.extract(html_doc, include_comments=False, include_tables=False) or soup.get_text(" ", strip=True)
+    body_text = " ".join(body_text.split())[:1800]
+
+    combined = f"{candidate.get('company_name', '')} {candidate.get('snippet', '')} {title} {body_text} {final_url}"
+    score = seller_intent_score(combined)
+    k_fold = fold_text(keyword)
+    s_fold = fold_text(sector)
+    loc_tokens = [fold_text(t) for t in [location, country] if t]
+
+    if k_fold and k_fold in fold_text(combined):
+        score += 18
+    if s_fold and s_fold in fold_text(combined):
+        score += 10
+    if any(token in fold_text(combined) for token in loc_tokens):
+        score += 8
+    if final_url.endswith(".tr/") or ".com.tr/" in final_url:
+        score += 6
+    if looks_like_article_or_info_page(title, body_text[:300], final_url):
+        score -= 60
+
+    if score < 24:
+        return None
+
+    verified = dict(candidate)
+    verified["website"] = final_url
+    verified["score"] = candidate.get("score", 0) + score
+    verified["snippet"] = title or candidate.get("snippet", "") or body_text[:220]
+    return verified
+
+
 def store_candidate(final_results, title, url, snippet, keyword, sector, location, country):
     """Sonucu puanlayıp sözlüğe ekler."""
-    clean_url = unwrap_search_result_url(url)
-    if not clean_url or not clean_url.startswith("http") or not is_allowed_domain(clean_url):
+    original_url = unwrap_search_result_url(url)
+    if not original_url or not original_url.startswith("http") or not is_allowed_domain(original_url):
         return
 
+    clean_url = original_url
     lower_url = clean_url.lower()
-    is_li = ("linkedin.com/company/" in lower_url or "linkedin.com/school/" in lower_url)
+    is_li = is_linkedin_company_url(lower_url)
     is_person = any(x in lower_url for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/"])
     if is_person:
         return
 
-    if not is_li:
+    if is_li:
+        clean_url = normalize_linkedin_company_url(clean_url)
+        if not clean_url:
+            return
+    else:
         clean_url = normalize_company_site_url(clean_url)
         if not clean_url:
             return
@@ -392,10 +1006,10 @@ def store_candidate(final_results, title, url, snippet, keyword, sector, locatio
         if any(token in fold_text(f"{title} {snippet}") for token in COMPANY_HINT_TOKENS):
             score += 10
 
-    if score < 10:
+    if score < -5:
         return
 
-    company_name = title.split("-")[0].split("|")[0].strip() or extract_company_name_from_url(clean_url)
+    company_name = clean_company_name(title) or extract_company_name_from_url(clean_url)
     if len(company_name) < 2:
         return
 
@@ -404,6 +1018,7 @@ def store_candidate(final_results, title, url, snippet, keyword, sector, locatio
         final_results[clean_url] = {
             "company_name": company_name,
             "website": clean_url,
+            "source_url": original_url,
             "score": score,
             "is_linkedin": is_li,
             "snippet": snippet or f"Firma: {company_name}"
@@ -419,7 +1034,7 @@ def fetch_bing_results_http(query, country=""):
         resp = HTTP_SESSION.get(
             "https://www.bing.com/search",
             params={"q": query, "setlang": lang, "cc": c_code},
-            timeout=12,
+            timeout=SEARCH_HTTP_TIMEOUT,
         )
         resp.raise_for_status()
     except Exception as exc:
@@ -438,6 +1053,62 @@ def fetch_bing_results_http(query, country=""):
             "href": title_el.get("href", ""),
             "body": snippet_el.get_text(" ", strip=True) if snippet_el else "",
         })
+    if parsed_results:
+        return parsed_results
+
+    try:
+        rss_resp = HTTP_SESSION.get(
+            "https://www.bing.com/search",
+            params={"q": query, "setlang": lang, "cc": c_code, "format": "rss"},
+            timeout=SEARCH_HTTP_TIMEOUT,
+        )
+        rss_resp.raise_for_status()
+        root = ET.fromstring(rss_resp.text)
+    except Exception as exc:
+        print(f"HTTP Bing RSS Hata [{query}]: {exc}")
+        return []
+
+    rss_results = []
+    for item in root.findall("./channel/item")[:15]:
+        rss_results.append({
+            "title": (item.findtext("title") or "").strip(),
+            "href": (item.findtext("link") or "").strip(),
+            "body": (item.findtext("description") or "").strip(),
+        })
+    return rss_results
+
+
+def fetch_brave_results_http(query):
+    """Brave Search üzerinden sonuç çeker."""
+    try:
+        resp = HTTP_SESSION.get(
+            "https://search.brave.com/search",
+            params={"q": query},
+            timeout=SEARCH_HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        print(f"HTTP Brave Hata [{query}]: {exc}")
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    parsed_results = []
+    for card in soup.select('div[data-type="web"]')[:15]:
+        title_el = card.select_one("a.title, a.svelte-14r20fy.l1, a[href^='http']")
+        if not title_el:
+            continue
+        href = title_el.get("href", "").strip()
+        if not href.startswith("http"):
+            continue
+        title = title_el.get_text(" ", strip=True)
+        if not title:
+            title = card.get_text(" ", strip=True)[:120]
+        desc_parts = [node.get_text(" ", strip=True) for node in card.select(".description")[:2]]
+        parsed_results.append({
+            "title": title,
+            "href": href,
+            "body": " ".join(part for part in desc_parts if part).strip(),
+        })
     return parsed_results
 
 
@@ -447,7 +1118,7 @@ def fetch_ddg_results_http(query):
         resp = HTTP_SESSION.get(
             "https://html.duckduckgo.com/html/",
             params={"q": query},
-            timeout=12,
+            timeout=max(3, SEARCH_HTTP_TIMEOUT - 1),
         )
         resp.raise_for_status()
     except Exception as exc:
@@ -499,6 +1170,331 @@ def score_company_website_match(company_name, title, snippet, url):
     return score
 
 
+def candidate_domain_suffixes(country=""):
+    """Ülkeye göre denenecek alan adı son eklerini üretir."""
+    c_fold = fold_text(country)
+    suffixes = []
+    target_tld = TLD_MAP.get(c_fold, "")
+    if target_tld:
+        suffixes.append(target_tld)
+        if target_tld == ".tr":
+            suffixes.append(".com.tr")
+    elif c_fold in {"turkiye", "turkey", "tr"}:
+        suffixes.extend([".com.tr", ".tr"])
+
+    for fallback in [".com", ".net", ".org"]:
+        if fallback not in suffixes:
+            suffixes.append(fallback)
+    return suffixes
+
+
+def guess_company_website(company_name, country=""):
+    """Firma adından olası domain'leri deneyerek resmi siteyi bulmaya çalışır."""
+    tokens = [token for token in normalize_company_identity(company_name).split() if len(token) >= 2]
+    if not tokens:
+        return None
+
+    base_names = []
+    joined = "".join(tokens)
+    hyphenated = "-".join(tokens)
+    for candidate in [joined, hyphenated]:
+        if candidate and candidate not in base_names:
+            base_names.append(candidate)
+
+    if len(tokens) >= 2:
+        compact_pair = "".join(tokens[:2])
+        hyphen_pair = "-".join(tokens[:2])
+        for candidate in [compact_pair, hyphen_pair]:
+            if candidate and candidate not in base_names:
+                base_names.append(candidate)
+
+    best = None
+    for base_name in base_names[:6]:
+        for suffix in candidate_domain_suffixes(country):
+            url = f"https://{base_name}{suffix}/"
+            try:
+                resp = HTTP_SESSION.get(url, timeout=6, allow_redirects=True)
+            except Exception:
+                continue
+
+            final_url = normalize_company_site_url(resp.url or url)
+            if not final_url or resp.status_code >= 400:
+                continue
+
+            html = resp.text or ""
+            soup = BeautifulSoup(html, "html.parser")
+            title = soup.title.get_text(" ", strip=True) if soup.title else ""
+            snippet = soup.get_text(" ", strip=True)[:400]
+            score = score_company_website_match(company_name, title, snippet, final_url) + 20
+            if suffix in {".com.tr", ".tr"}:
+                score += 6
+
+            if score < 34:
+                continue
+
+            candidate = {
+                "company_name": clean_company_name(company_name) or company_name,
+                "website": final_url,
+                "score": score,
+                "is_linkedin": False,
+                "snippet": title or snippet or f"Firma: {company_name}",
+            }
+            if not best or candidate["score"] > best["score"]:
+                best = candidate
+
+    return best
+
+
+def build_http_session(li_at=""):
+    """Varsayılan başlıklarla yeni HTTP oturumu oluşturur."""
+    session = requests.Session()
+    session.trust_env = False
+    session.headers.update(DEFAULT_HEADERS)
+    if li_at:
+        session.cookies.set("li_at", li_at, domain=".linkedin.com", path="/")
+    return session
+
+
+def iter_nested_json_nodes(value):
+    """İç içe JSON yapılarındaki tüm düğümleri gezer."""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_nested_json_nodes(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_nested_json_nodes(child)
+
+
+def linkedin_slug_candidates(company_name, website_url=""):
+    """Firma adına ve domaine göre olası LinkedIn slug adayları üretir."""
+    candidates = []
+    tokens = [token for token in normalize_company_identity(company_name).split() if len(token) >= 2]
+
+    def add(value):
+        value = re.sub(r"[^a-z0-9-]+", "-", fold_text(value or "")).strip("-")
+        value = re.sub(r"-{2,}", "-", value)
+        if value and value not in candidates:
+            candidates.append(value)
+
+    if tokens:
+        add("-".join(tokens))
+        add("".join(tokens))
+        if len(tokens) >= 2:
+            add("-".join(tokens[:2]))
+            add("".join(tokens[:2]))
+        if len(tokens) >= 3:
+            add("-".join(tokens[:3]))
+
+    host = urlparse(website_url or "").netloc.lower().replace("www.", "")
+    if host:
+        host_root = host.split(".")[0]
+        add(host_root)
+        if tokens:
+            add(f"{host_root}-{tokens[0]}")
+            add(f"{tokens[0]}-{host_root}")
+
+    return candidates[:10]
+
+
+def extract_linkedin_company_profile(page_html, company_url="", expected_name=""):
+    """LinkedIn şirket sayfasındaki gömülü JSON'dan firma verisini çeker."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    expected_tokens = company_token_set(expected_name)
+    best_name = ""
+    best_name_score = -1
+    website_url = ""
+
+    def maybe_promote_name(candidate_name):
+        nonlocal best_name, best_name_score
+        candidate_name = clean_company_name(candidate_name)
+        if len(candidate_name) < 2 or not is_plausible_company_name(candidate_name):
+            return
+        candidate_tokens = company_token_set(candidate_name)
+        if expected_tokens and candidate_tokens and not (expected_tokens & candidate_tokens):
+            return
+        overlap = len(expected_tokens & candidate_tokens) if expected_tokens else len(candidate_tokens)
+        score = overlap * 20 + len(candidate_name)
+        if score > best_name_score:
+            best_name = candidate_name
+            best_name_score = score
+
+    for code in soup.find_all("code"):
+        raw = (code.get_text() or "").strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+
+        for node in iter_nested_json_nodes(payload):
+            node_name = node.get("name")
+            if isinstance(node_name, str):
+                maybe_promote_name(node_name)
+
+            node_url = node.get("url")
+            if isinstance(node_url, str):
+                normalized_li = normalize_linkedin_company_url(node_url)
+                normalized_web = normalize_company_site_url(node_url)
+                if normalized_li and not best_name:
+                    maybe_promote_name(extract_company_name_from_url(normalized_li))
+                if normalized_web:
+                    website_url = website_url or normalized_web
+
+            if node.get("type") == "VIEW_WEBSITE" and isinstance(node.get("url"), str):
+                normalized_cta = normalize_company_site_url(node.get("url"))
+                if normalized_cta:
+                    website_url = normalized_cta
+
+    decoded = html.unescape(page_html)
+    if not website_url:
+        website_match = re.search(r'"type":"VIEW_WEBSITE".{0,1500}?"url":"(https?://[^"]+)"', decoded, re.DOTALL)
+        if website_match:
+            website_url = normalize_company_site_url(website_match.group(1))
+
+    linkedin_url = normalize_linkedin_company_url(company_url)
+    summary = ""
+    if best_name:
+        summary = best_name
+        if website_url:
+            summary = f"{best_name} | {website_url}"
+
+    if expected_tokens and best_name:
+        candidate_tokens = company_token_set(best_name)
+        if candidate_tokens and not (expected_tokens & candidate_tokens):
+            return None
+
+    if not linkedin_url:
+        return None
+
+    return {
+        "company_name": best_name or clean_company_name(expected_name) or extract_company_name_from_url(linkedin_url),
+        "linkedin_url": linkedin_url,
+        "website_url": website_url or "",
+        "summary": summary,
+    }
+
+
+def extract_linkedin_search_results_from_html(page_html, limit=15):
+    """LinkedIn sirket arama HTML'inden sirket adaylarini cikarir."""
+    soup = BeautifulSoup(page_html or "", "html.parser")
+    results = []
+    seen = set()
+    subtitle_selectors = [
+        ".entity-result__primary-subtitle",
+        ".entity-result__summary",
+        ".entity-result__secondary-subtitle",
+        '[data-test-app-aware-link] + div span[aria-hidden="true"]',
+    ]
+    blocked_parts = ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/", "/feed/", "/groups/", "/events/", "/school/", "/showcase/"]
+
+    def find_card(node):
+        current = node
+        while current is not None:
+            if getattr(current, "name", None) in {"li", "section", "div"}:
+                class_text = " ".join(current.get("class", []))
+                if "reusable-search__result-container" in class_text or "entity-result" in class_text:
+                    return current
+            current = current.parent
+        return node.parent if getattr(node, "parent", None) else None
+
+    for index, link in enumerate(soup.select('a[href*="/company/"]')):
+        raw_href = (link.get("href") or "").strip()
+        linkedin_url = normalize_linkedin_company_url(urljoin("https://www.linkedin.com/", raw_href))
+        if not linkedin_url or linkedin_url in seen:
+            continue
+        lower_url = linkedin_url.lower()
+        if any(part in lower_url for part in blocked_parts):
+            continue
+        seen.add(linkedin_url)
+
+        card = find_card(link)
+        name = clean_company_name(link.get_text(" ", strip=True))
+        if (not name or len(name) < 2) and card:
+            heading = card.select_one('span[aria-hidden="true"], h3, h4')
+            if heading:
+                name = clean_company_name(heading.get_text(" ", strip=True))
+        if not name or len(name) < 2:
+            name = extract_company_name_from_url(linkedin_url)
+        if not name or len(name) < 2:
+            continue
+
+        subtitle = ""
+        if card:
+            for selector in subtitle_selectors:
+                node = card.select_one(selector)
+                if node:
+                    subtitle = " ".join(node.get_text(" ", strip=True).split())
+                    if subtitle:
+                        break
+
+        results.append({
+            "company_name": name,
+            "linkedin_url": linkedin_url,
+            "title": subtitle,
+            "score": max(limit, 5) * 20 - index,
+        })
+        if len(results) >= max(limit * 3, 12):
+            break
+
+    return results
+
+
+def fetch_linkedin_company_profile_http(company_url, li_at="", expected_name=""):
+    """LinkedIn şirket sayfasını HTTP ile okuyup şirket profilini döndürür."""
+    linkedin_url = normalize_linkedin_company_url(company_url)
+    if not linkedin_url:
+        return None
+
+    session = build_http_session(li_at=li_at)
+    try:
+        response = session.get(linkedin_url, timeout=LINKEDIN_HTTP_TIMEOUT, allow_redirects=True)
+        response.raise_for_status()
+    except Exception as exc:
+        print(f"LinkedIn profil HTTP hatasi [{linkedin_url}]: {exc}")
+        return None
+
+    final_url = normalize_linkedin_company_url(response.url or linkedin_url)
+    page_html = response.text or ""
+    low_html = page_html.lower()
+    if response.status_code != 200 or "authwall" in low_html or "security verification" in low_html:
+        return None
+
+    profile = extract_linkedin_company_profile(page_html, company_url=final_url, expected_name=expected_name)
+    if not profile:
+        return None
+
+    match_score = score_company_website_match(
+        expected_name or profile.get("company_name", ""),
+        profile.get("company_name", ""),
+        profile.get("summary", ""),
+        final_url,
+    )
+    if expected_name and match_score < 24:
+        return None
+
+    profile["linkedin_url"] = final_url
+    return profile
+
+
+def find_company_linkedin(company_name, website_url="", li_at=""):
+    """Firma adına göre LinkedIn şirket sayfasını tahmin edip doğrular."""
+    if not li_at:
+        return None
+
+    for slug in linkedin_slug_candidates(company_name, website_url=website_url):
+        profile = fetch_linkedin_company_profile_http(
+            f"https://www.linkedin.com/company/{slug}/",
+            li_at=li_at,
+            expected_name=company_name,
+        )
+        if profile:
+            return profile
+
+    return None
+
+
 def find_company_website(company_name, keyword="", sector="", location="", country=""):
     """Firma adindan resmi web sitesini bulmaya calisir."""
     clean_name = (company_name or "").strip()
@@ -519,7 +1515,9 @@ def find_company_website(company_name, keyword="", sector="", location="", count
     best = None
     seen_urls = set()
     for query in queries:
-        combined_results = fetch_bing_results_http(query, country) + fetch_ddg_results_http(query)
+        combined_results = fetch_brave_results_http(query) + fetch_bing_results_http(query, country)
+        if not combined_results:
+            combined_results = fetch_ddg_results_http(query)
         for entry in combined_results:
             url = unwrap_search_result_url(entry.get("href", ""))
             lower_url = url.lower()
@@ -563,6 +1561,10 @@ def find_company_website(company_name, keyword="", sector="", location="", count
         if best and best["score"] >= 80:
             break
 
+    guessed = guess_company_website(clean_name, country=country)
+    if guessed and (not best or guessed["score"] >= best["score"]):
+        return guessed
+
     return best
 
 
@@ -580,78 +1582,32 @@ def extract_linkedin_company_website_openclaw(company_url):
 
         openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
         openclaw_browser_wait(target_id=target_id, time_ms=2500, timeout_ms=5000)
+        snapshot = openclaw_browser_capture_page(target_id, timeout_ms=20000) or {}
+        profile = extract_linkedin_company_profile(
+            snapshot.get("html", ""),
+            company_url=snapshot.get("url", company_url),
+            expected_name="",
+        )
 
-        website_js = r"""() => {
-            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-            const decodeHref = (href) => {
-                if (!href) return '';
-                try {
-                    const parsed = new URL(href, location.href);
-                    const redirectTarget = parsed.searchParams.get('url') || parsed.searchParams.get('dest') || parsed.searchParams.get('redir');
-                    if (redirectTarget) return decodeURIComponent(redirectTarget);
-                    return parsed.href;
-                } catch (err) {
-                    return '';
-                }
-            };
-            const entries = Array.from(document.querySelectorAll('a[href]')).map((anchor) => {
-                const href = decodeHref(anchor.getAttribute('href') || anchor.href || '');
-                if (!/^https?:/i.test(href)) return null;
-                let parsed;
-                try {
-                    parsed = new URL(href);
-                } catch (err) {
-                    return null;
-                }
-                const host = parsed.hostname.replace(/^www\./i, '').toLowerCase();
-                if (!host || host.endsWith('linkedin.com')) return null;
-                const text = clean(anchor.textContent) || clean(anchor.getAttribute('aria-label')) || clean(anchor.title);
-                const isBad = /^(mailto:|tel:|javascript:)/i.test(href) || /(facebook|instagram|twitter|x\.com|youtube|tiktok)\./i.test(host);
-                if (isBad) return null;
-                let score = 0;
-                if (/(website|visit website|web site|site web|firma sitesi|kurumsal|official)/i.test(text)) score += 60;
-                if (parsed.pathname === '/' || parsed.pathname === '') score += 10;
-                if (/linkedin\.com\/redir/i.test(anchor.href || '')) score += 12;
-                if (text.length > 0 && text.length < 80) score += 6;
-                return {
-                    url: `${parsed.protocol}//${parsed.host}/`,
-                    raw: parsed.href,
-                    text,
-                    score
-                };
-            }).filter(Boolean).sort((a, b) => b.score - a.score);
-
-            const summary = clean(document.body?.innerText || '').slice(0, 400);
-            return {
-                website: entries[0] || null,
-                summary
-            };
-        }"""
-
-        extracted = openclaw_browser_evaluate(target_id, website_js, timeout_ms=20000) or {}
-        website = extracted.get("website") if isinstance(extracted, dict) else None
-        summary = extracted.get("summary", "") if isinstance(extracted, dict) else ""
-
-        if not website:
+        if not (profile and profile.get("website_url")):
             about_url = company_url.rstrip("/") + "/about/"
             openclaw_browser_navigate(target_id, about_url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
             openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
             openclaw_browser_wait(target_id=target_id, time_ms=2500, timeout_ms=5000)
-            extracted = openclaw_browser_evaluate(target_id, website_js, timeout_ms=20000) or {}
-            website = extracted.get("website") if isinstance(extracted, dict) else None
-            summary = summary or (extracted.get("summary", "") if isinstance(extracted, dict) else "")
+            snapshot = openclaw_browser_capture_page(target_id, timeout_ms=20000) or {}
+            profile = extract_linkedin_company_profile(
+                snapshot.get("html", ""),
+                company_url=snapshot.get("url", about_url),
+                expected_name="",
+            )
 
-        if not website:
-            return None
-
-        normalized_url = normalize_company_site_url(website.get("url") or website.get("raw") or "")
-        if not normalized_url:
+        if not profile or not profile.get("website_url"):
             return None
 
         return {
-            "website_url": normalized_url,
-            "summary": summary,
-            "label": website.get("text", ""),
+            "website_url": normalize_company_site_url(profile.get("website_url", "")) or "",
+            "summary": profile.get("summary", ""),
+            "label": profile.get("company_name", ""),
         }
     except Exception as exc:
         print(f"OpenClaw LinkedIn website cikarimi basarisiz [{company_url}]: {exc}")
@@ -661,76 +1617,85 @@ def extract_linkedin_company_website_openclaw(company_url):
             openclaw_browser_close(company_tab.get("targetId") or company_tab.get("id"))
 
 
-def search_linkedin_companies_openclaw(keyword, sector, location="", li_at=None, limit=5):
+def search_linkedin_companies_openclaw(keyword, sector, location="", country="", li_at=None, limit=5):
     """LinkedIn company search sonucunu OpenClaw browser ile toplar."""
     if not li_at:
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = "skip:no_token"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("skip", "no_token")
         return []
 
     status = ensure_openclaw_browser_started()
-    if not status or not status.get("enabled"):
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = "error:browser_unavailable"
+    if not status or (not status.get("running") and not status.get("enabled", True)):
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", "browser_unavailable")
         return []
     if not set_openclaw_linkedin_cookie(li_at):
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = "error:cookie_set_failed"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", "cookie_set_failed")
         return []
 
-    query = build_query(keyword, sector, location)
+    query = build_query(keyword, sector, location, country)
     search_url = f"https://www.linkedin.com/search/results/companies/?keywords={quote_plus(query)}"
     search_tab = None
     try:
-        search_tab = openclaw_browser_open(search_url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
+        search_tab = openclaw_browser_open("https://www.linkedin.com/feed/", timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
         target_id = search_tab.get("targetId") or search_tab.get("id")
         if not target_id:
             return []
 
         openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=20000)
-        openclaw_browser_wait(target_id=target_id, selector="li.reusable-search__result-container", timeout_ms=20000)
+        current_url = str((openclaw_browser_capture_page(target_id, timeout_ms=10000) or {}).get("url", "") or "")
+        if "login" in current_url or "authwall" in current_url:
+            os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", "token_rejected")
+            return []
 
-        results_js = f"""() => {{
-            const clean = (value) => (value || '').replace(/\\s+/g, ' ').trim();
-            return Array.from(document.querySelectorAll('li.reusable-search__result-container')).map((item, index) => {{
-                const link = item.querySelector('a[href*="/company/"], a[href*="/school/"]');
-                if (!link) return null;
-                const href = (link.href || '').split('?')[0];
-                if (!/linkedin\\.com\\/(company|school)\\//i.test(href)) return null;
-                if (/(\\/in\\/|\\/people\\/|\\/pub\\/|\\/jobs\\/|\\/pulse\\/|\\/search\\/|\\/posts\\/)/i.test(href)) return null;
-                const name = clean(link.textContent).split(' · ')[0];
-                if (!name || name.length < 2) return null;
-                const subtitleEl = item.querySelector('.entity-result__primary-subtitle, .entity-result__summary');
-                return {{
-                    company_name: name,
-                    linkedin_url: href,
-                    title: clean(subtitleEl ? subtitleEl.textContent : ''),
-                    score: {max(limit, 5) * 20} - index
-                }};
-            }}).filter(Boolean).slice(0, {max(limit, 5)});
-        }}"""
-        extracted_results = openclaw_browser_evaluate(target_id, results_js, timeout_ms=20000)
+        openclaw_browser_navigate(target_id, search_url, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
+        openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=20000)
+        try:
+            openclaw_browser_wait(
+                target_id=target_id,
+                selector="li.reusable-search__result-container, a[href*='/company/']",
+                timeout_ms=20000,
+            )
+        except Exception:
+            openclaw_browser_wait(target_id=target_id, time_ms=2500, timeout_ms=5000)
+
+        snapshot = openclaw_browser_capture_page(target_id, timeout_ms=20000) or {}
+        extracted_results = extract_linkedin_search_results_from_html(
+            snapshot.get("html", ""),
+            limit=max(limit * 3, 12),
+        )
         if not isinstance(extracted_results, list):
-            os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = "error:invalid_result"
+            os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", "invalid_result")
             return []
 
         final_results = []
-        for row in extracted_results[:limit]:
-            company_name = row.get("company_name", "").strip()
-            linkedin_url = row.get("linkedin_url", "").split("?")[0]
+        for row in extracted_results[: max(limit * 3, limit)]:
+            company_name = clean_company_name(row.get("company_name", ""))
+            linkedin_url = normalize_linkedin_company_url(row.get("linkedin_url", ""))
             if not company_name or not linkedin_url:
                 continue
 
             website_info = extract_linkedin_company_website_openclaw(linkedin_url)
-            final_results.append({
-                "company_name": company_name,
-                "linkedin_url": linkedin_url,
-                "website_url": website_info.get("website_url", "") if website_info else "",
-                "title": website_info.get("summary", "") if website_info and website_info.get("summary") else row.get("title", ""),
-                "score": row.get("score", 0),
-            })
+            validated = validate_linkedin_company_candidate(
+                company_name,
+                linkedin_url,
+                keyword=keyword,
+                sector=sector,
+                location=location,
+                country=country,
+                li_at=li_at,
+                title_hint=row.get("title", ""),
+                website_hint=(website_info.get("website_url") or website_info.get("website") or "") if website_info else "",
+            )
+            if not validated:
+                continue
+            validated["score"] = validated.get("score", 0) + row.get("score", 0)
+            final_results.append(validated)
+            if len(final_results) >= limit:
+                break
 
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = f"ok:{len(final_results)}"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("ok", str(len(final_results)))
         return final_results
     except Exception as exc:
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = f"error:{str(exc)[:120]}"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", str(exc)[:120])
         print(f"OpenClaw LinkedIn search hatasi: {exc}")
         return []
     finally:
@@ -738,39 +1703,75 @@ def search_linkedin_companies_openclaw(keyword, sector, location="", li_at=None,
             openclaw_browser_close(search_tab.get("targetId") or search_tab.get("id"))
 
 
-def search_linkedin_company_pages_http(keyword, sector, location="", country="", limit=5):
+def search_linkedin_company_pages_http(keyword, sector, location="", country="", limit=5, li_at=""):
     """LinkedIn şirket sayfalarını tarayıcı olmadan arar."""
     queries = [
         build_query("site:linkedin.com/company/", keyword, sector, location, country),
         build_query("site:linkedin.com/company/", sector, keyword, location, country),
+        build_query("site:www.linkedin.com/company/", f"\"{keyword}\"", sector, location, country),
+        build_query("site:www.linkedin.com/company/", keyword, f"\"{sector}\"", location, country),
         build_query(keyword, sector, location, country, "official linkedin company"),
+        build_query(keyword, sector, location, country, "\"linkedin\" company"),
     ]
 
     found = {}
     for query in queries:
-        for entry in fetch_bing_results_http(query, country) + fetch_ddg_results_http(query):
-            url = unwrap_search_result_url(entry.get("href", ""))
-            lower_url = url.lower()
-            if "linkedin.com/company/" not in lower_url and "linkedin.com/school/" not in lower_url:
+        combined_results = fetch_brave_results_http(query) + fetch_bing_results_http(query, country)
+        if not combined_results:
+            combined_results = fetch_ddg_results_http(query)
+        for entry in combined_results:
+            url = normalize_linkedin_company_url(entry.get("href", ""))
+            if not url:
                 continue
+            lower_url = url.lower()
             if any(x in lower_url for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/"]):
                 continue
 
-            name = entry.get("title", "").split("-")[0].split("|")[0].strip() or extract_company_name_from_url(url)
-            if url not in found:
+            title = entry.get("title", "").strip()
+            snippet = entry.get("body", "").strip()
+            name = clean_company_name(title) or extract_company_name_from_url(url)
+            score = score_candidate(
+                {"title": title, "body": snippet, "href": url},
+                keyword,
+                sector,
+                location,
+                country,
+            ) + 120
+            haystack = fold_text(f"{title} {snippet}")
+            if keyword and fold_text(keyword) in haystack:
+                score += 10
+            if sector and fold_text(sector) in haystack:
+                score += 6
+
+            if url not in found or score > found[url]["score"]:
                 found[url] = {
                     "company_name": name,
-                    "linkedin_url": url.split("?")[0],
-                    "title": entry.get("body", ""),
-                    "score": 10,
+                    "linkedin_url": url,
+                    "title": snippet,
+                    "score": score,
                 }
 
-            if len(found) >= limit:
-                break
-        if len(found) >= limit:
+    ranked = sorted(found.values(), key=lambda item: item["score"], reverse=True)
+    final_results = []
+    for row in ranked[: max(limit * 2, limit)]:
+        website_info = find_company_website(
+            row["company_name"],
+            keyword=keyword,
+            sector=sector,
+            location=location,
+            country=country,
+        )
+        final_results.append({
+            "company_name": row["company_name"],
+            "linkedin_url": row["linkedin_url"],
+            "website_url": (website_info.get("website_url") or website_info.get("website") or "") if website_info else "",
+            "title": row["title"],
+            "score": row["score"] + (website_info.get("score", 0) if website_info else 0),
+        })
+        if len(final_results) >= limit:
             break
 
-    return list(found.values())[:limit]
+    return final_results
 
 def score_candidate(entry, keyword, sector, location, country):
     """Şirketin uygunluğunu puanlar (0-30 arası)."""
@@ -785,6 +1786,7 @@ def score_candidate(entry, keyword, sector, location, country):
     # Anahtar kelime ve Sektör eşleşmesi (En önemli sinyaller)
     if k_fold and k_fold in haystack: score += 10
     if s_fold and s_fold in haystack: score += 6
+    score += seller_intent_score(haystack)
     
     # Sanayici/Üretici kelime grupları
     if any(token in haystack for token in INDUSTRY_TOKENS): score += 3
@@ -825,6 +1827,8 @@ def score_candidate(entry, keyword, sector, location, country):
     # KİŞİSEL PROFİL CEZASI (URL bazlı son kontrol)
     if any(x in domain for x in ["/in/", "/pub/", "/people/"]):
         score -= 100 # Şirket arıyoruz, kişileri değil.
+    if looks_like_article_or_info_page(entry.get('title', ''), entry.get('body', ''), entry.get('href', '')):
+        score -= 120
         
     return score
 
@@ -838,21 +1842,27 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     q_loc = f'"{location}"' if location else ""
 
     web_queries = [
-        build_query(keyword, sector, q_loc, country, "official website"),
-        build_query(keyword, sector, q_loc, country),
+        build_query(keyword, sector, q_loc, country, "manufacturer"),
+        build_query(keyword, sector, q_loc, country, "supplier"),
+        build_query(keyword, sector, q_loc, country, "distributor"),
+        build_query(keyword, sector, q_loc, country, "dealer"),
+        build_query(keyword, sector, q_loc, country, "reseller"),
         build_query(keyword, sector, q_loc, country, "company"),
         build_query(keyword, sector, q_loc, country, "firma"),
         build_query(keyword, sector, q_loc, country, "official company website"),
         build_query(keyword, sector, q_loc, country, "kurumsal"),
         build_query(keyword, sector, "manufacturer in", q_loc, country),
         build_query(sector, keyword, "supplier", q_loc, country),
+        build_query(sector, keyword, "distributor", q_loc, country),
+        build_query(sector, keyword, "bayi", q_loc, country),
+        build_query(sector, keyword, "tedarikci", q_loc, country),
     ]
     if target_tld:
-        web_queries.append(build_query(f"site:{target_tld}", keyword, sector, q_loc))
+        web_queries.append(build_query(f"site:{target_tld}", keyword, sector, "supplier", q_loc))
     
     final_results = {}
     
-    if not PLAYWRIGHT_DISABLED:
+    if can_use_playwright():
         try:
             with sync_playwright() as p:
                 # Bing bot koruması konusunda daha esnek olduğu için Chromium kullanıyoruz
@@ -891,6 +1901,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                 
                 browser.close()
         except Exception as e:
+            mark_playwright_failed(e)
             print(f"Playwright Arama Hatası, HTTP fallback devreye giriyor: {str(e)}")
     else:
         print("Playwright kapali: OPENCLAW_DISABLE_PLAYWRIGHT=1, HTTP fallback kullaniliyor.")
@@ -899,7 +1910,10 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
         for q in web_queries:
             if len(final_results) >= (limit + 4):
                 break
-            for entry in fetch_bing_results_http(q, country) + fetch_ddg_results_http(q):
+            combined_results = fetch_brave_results_http(q) + fetch_bing_results_http(q, country)
+            if not combined_results:
+                combined_results = fetch_ddg_results_http(q)
+            for entry in combined_results:
                 store_candidate(
                     final_results,
                     entry.get("title", ""),
@@ -914,7 +1928,21 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                     break
 
     sorted_list = sorted(final_results.values(), key=lambda x: x['score'], reverse=True)
-    return sorted_list[:limit]
+    verified_results = []
+    for candidate in sorted_list[: max(limit * 4, 12)]:
+        verified = verify_company_homepage(candidate, keyword, sector, location=location, country=country)
+        if not verified:
+            continue
+        verified_results.append(verified)
+        if len(verified_results) >= limit:
+            break
+
+    return verified_results[:limit]
+
+
+for _token in ("company", "school"):
+    if _token not in NOISY_NAME_TOKENS:
+        NOISY_NAME_TOKENS.append(_token)
 
 def read_website_content(url):
     """Bir web sitesinin içeriğini okur ve temizler."""
@@ -923,27 +1951,39 @@ def read_website_content(url):
         resp = HTTP_SESSION.get(url, timeout=12)
         resp.raise_for_status()
         content = trafilatura.extract(resp.text, include_comments=False, include_tables=True)
+        if not content:
+            downloaded = trafilatura.fetch_url(url)
+            content = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
         return content[:3000] if content else "Icerik okunamadi."
     except:
         return "Baglanti hatasi."
 
-def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5):
+def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5, country=""):
     """LinkedIn üzerinden şirket arar (Playwright - Defansif Mod)."""
-    query = f"{keyword} {sector} {location}".strip()
+    query = build_query(keyword, sector, location, country)
     search_url = f"https://www.linkedin.com/search/results/companies/?keywords={query}"
 
-    openclaw_results = search_linkedin_companies_openclaw(keyword, sector, location, li_at=li_at, limit=limit)
-    if openclaw_results:
-        return openclaw_results
-
-    fallback_results = search_linkedin_company_pages_http(keyword, sector, location, "", limit=limit)
+    fallback_results = search_linkedin_company_pages_http(keyword, sector, location, country, limit=limit, li_at=li_at or "")
     if fallback_results:
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = f"http_fallback:{len(fallback_results)}"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("http_fallback", str(len(fallback_results)))
+
+    if OPENCLAW_LINKEDIN_BROWSER_ENABLED:
+        openclaw_results = search_linkedin_companies_openclaw(
+            keyword,
+            sector,
+            location,
+            country=country,
+            li_at=li_at,
+            limit=limit,
+        )
+        if openclaw_results:
+            return openclaw_results
+
     if not li_at:
         return fallback_results
 
     results = []
-    if not PLAYWRIGHT_DISABLED:
+    if can_use_playwright():
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
@@ -974,32 +2014,1433 @@ def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5)
                     for i, item in enumerate(items[:limit]):
                         title_el = item.query_selector('span.entity-result__title-text a')
                         if title_el:
-                            name = title_el.inner_text().split("\n")[0].strip()
-                            url = title_el.get_attribute("href").split("?")[0]
+                            name = clean_company_name(title_el.inner_text().split("\n")[0].strip())
+                            url = normalize_linkedin_company_url(title_el.get_attribute("href"))
                             lower_url = url.lower()
-                            if "linkedin.com/company/" not in lower_url and "linkedin.com/school/" not in lower_url:
+                            if not lower_url:
                                 continue
                             if any(x in lower_url for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/"]):
                                 continue
                             desc_el = item.query_selector('div.entity-result__primary-subtitle')
-                            results.append({
-                                "company_name": name,
-                                "linkedin_url": url,
-                                "title": desc_el.inner_text().strip() if desc_el else "",
-                                "score": 10 - i
-                            })
+                            title_hint = desc_el.inner_text().strip() if desc_el else ""
+                            validated = validate_linkedin_company_candidate(
+                                name,
+                                url,
+                                keyword=keyword,
+                                sector=sector,
+                                location=location,
+                                country=country,
+                                li_at=li_at or "",
+                                title_hint=title_hint,
+                                website_hint="",
+                            )
+                            if not validated:
+                                continue
+                            validated["score"] = validated.get("score", 0) + 10 - i
+                            results.append(validated)
                 except:
                     pass # Sonuç bulunamadıysa boş dön
                     
                 browser.close()
         except Exception as e:
+            mark_playwright_failed(e)
             print(f"LinkedIn Hata, HTTP fallback devreye giriyor: {str(e)}")
     else:
         print("LinkedIn Playwright kapali: OPENCLAW_DISABLE_PLAYWRIGHT=1, HTTP fallback kullaniliyor.")
 
     final_results = results if results else fallback_results
     if results:
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = f"playwright:{len(results)}"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("playwright", str(len(results)))
     elif not os.environ.get("OPENCLAW_LAST_LINKEDIN_STATUS"):
-        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = "error:no_results"
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label("error", "no_results")
     return final_results
+
+
+# Runtime overrides for stricter seller/company discovery.
+def dedupe_queries(queries):
+    """Collapse repeated search queries while preserving order."""
+    unique = []
+    seen = set()
+    for query in queries:
+        clean_query = " ".join((query or "").split())
+        if not clean_query:
+            continue
+        key = clean_query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(clean_query)
+    return unique
+
+
+def score_company_name_candidate(name):
+    """Score name chunks so search-engine crumbs lose to real company names."""
+    text = re.sub(r"\s+", " ", (name or "").strip())
+    if len(text) < 2:
+        return -999
+
+    low = fold_text(text)
+    score = len(company_token_set(text)) * 18 + min(len(text), 40)
+    word_count = len(text.split())
+
+    if 1 <= word_count <= 6:
+        score += 12
+    elif 7 <= word_count <= 8:
+        score -= 18
+    elif 9 <= word_count <= 12:
+        score -= 75
+    elif word_count > 12:
+        score -= 140
+
+    if is_plausible_company_name(text):
+        score += 10
+
+    if re.search(r"[/:@]|\.com|\.net|\.org|\.tr|www\.", low):
+        score -= 35
+
+    if len(text) > 90:
+        score -= 120
+
+    if any(token in low for token in ["fiyat", "kiralama", "satilik", "temiz", "bakimli", "uygun", "ikinci el", "2 el"]):
+        score -= 100
+
+    for token in NOISY_NAME_TOKENS:
+        if token in low:
+            score -= 10
+
+    if any(char.isdigit() for char in text):
+        score += 4
+
+    return score
+
+
+def clean_company_name(name):
+    """Extract the cleanest company-like label from noisy search titles."""
+    text = html.unescape((name or "").strip()).replace("\xa0", " ")
+    if not text:
+        return ""
+
+    text = re.sub(r"\b(?:site|intitle):\S+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = text.replace("›", "|").replace("»", "|").replace("•", "|").replace("·", "|")
+    text = re.sub(r"\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    candidates = []
+    for part in re.split(r"\s*\|\s*|\s+-\s+|\s*:\s*|\s*/\s*|\s*[>»]\s*", text):
+        part = re.sub(r"\([^)]*\)", " ", part)
+        part = re.sub(r"\[[^\]]*\]", " ", part)
+        for token in NOISY_NAME_TOKENS:
+            part = re.sub(rf"\b{re.escape(token)}\b", " ", part, flags=re.IGNORECASE)
+        part = re.sub(r"[^0-9A-Za-z&+.' -]+", " ", part)
+        part = re.sub(r"\s+", " ", part).strip(" -|,")
+        if part:
+            candidates.append(part)
+
+    if not candidates:
+        fallback = re.sub(r"[^0-9A-Za-z&+.' -]+", " ", text)
+        return re.sub(r"\s+", " ", fallback).strip(" -|,")
+
+    return max(candidates, key=score_company_name_candidate)
+
+
+def best_company_name(*candidates):
+    """Pick the strongest company label from multiple noisy candidates."""
+    best_name = ""
+    best_score = -999
+    for candidate in candidates:
+        cleaned = clean_company_name(candidate)
+        score = score_company_name_candidate(cleaned)
+        if score > best_score:
+            best_name = cleaned
+            best_score = score
+    return best_name
+
+
+def host_brand_label(url):
+    """Return the most brand-like label from a hostname."""
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    labels = [label for label in host.split(".") if label]
+    generic = {"com", "net", "org", "co", "gov", "edu", "tr", "uk", "de", "fr", "it"}
+    for label in reversed(labels[:-1] if len(labels) > 1 else labels):
+        if label not in generic:
+            return label
+    return labels[0] if labels else ""
+
+
+def extract_company_name_from_url(url):
+    """Prefer brand-like hostnames over random path segments for company names."""
+    parsed = urlparse(url or "")
+    if is_linkedin_company_url(url):
+        segment = parsed.path.strip("/").split("/")[-1] if parsed.path else ""
+        segment = re.sub(r"[%_]+", " ", segment)
+        segment = segment.replace("-", " ").strip()
+        return clean_company_name(segment.title() if segment else "")
+
+    brand = host_brand_label(url)
+    if brand:
+        return clean_company_name(brand.replace("-", " ").replace("_", " ").title())
+
+    segment = parsed.path.strip("/").split("/")[-1] if parsed.path else ""
+    segment = re.sub(r"[%_]+", " ", segment)
+    segment = segment.replace("-", " ").strip()
+    return clean_company_name(segment.title() if segment else parsed.netloc.replace("www.", ""))
+
+
+def _cached_results(provider, query):
+    """Read provider/query cache."""
+    return SEARCH_RESULT_CACHE.get((provider, (query or "").strip().lower()))
+
+
+def _store_cached_results(provider, query, results):
+    """Write provider/query cache."""
+    SEARCH_RESULT_CACHE[(provider, (query or "").strip().lower())] = list(results)
+    return list(results)
+
+
+def fetch_brave_results_http(query):
+    """Fetch web results from Brave with simple cache and rate-limit backoff."""
+    global BRAVE_BACKOFF_UNTIL, BRAVE_FAILURE_COUNT
+
+    cached = _cached_results("brave", query)
+    if cached is not None:
+        return list(cached)
+
+    if time.time() < BRAVE_BACKOFF_UNTIL:
+        return []
+
+    try:
+        resp = HTTP_SESSION.get(
+            "https://search.brave.com/search",
+            params={"q": query},
+            timeout=SEARCH_HTTP_TIMEOUT,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code == 429:
+            BRAVE_FAILURE_COUNT += 1
+            BRAVE_BACKOFF_UNTIL = time.time() + min(600, 120 * BRAVE_FAILURE_COUNT)
+            return []
+        print(f"HTTP Brave Hata [{query}]: {exc}")
+        return []
+
+    BRAVE_FAILURE_COUNT = 0
+    BRAVE_BACKOFF_UNTIL = 0.0
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    parsed_results = []
+    for card in soup.select('div[data-type="web"]')[:15]:
+        title_el = card.select_one("a.title, a.svelte-14r20fy.l1, a[href^='http']")
+        if not title_el:
+            continue
+        href = title_el.get("href", "").strip()
+        if not href.startswith("http"):
+            continue
+        title = title_el.get_text(" ", strip=True) or card.get_text(" ", strip=True)[:120]
+        desc_parts = [node.get_text(" ", strip=True) for node in card.select(".description")[:2]]
+        parsed_results.append({
+            "title": title,
+            "href": href,
+            "body": " ".join(part for part in desc_parts if part).strip(),
+        })
+
+    return _store_cached_results("brave", query, parsed_results)
+
+
+def fetch_ddg_results_http(query):
+    """Fetch DuckDuckGo results with light backoff when the endpoint flakes."""
+    global DDG_BACKOFF_UNTIL, DDG_FAILURE_COUNT
+
+    cached = _cached_results("ddg", query)
+    if cached is not None:
+        return list(cached)
+
+    if time.time() < DDG_BACKOFF_UNTIL:
+        return []
+
+    try:
+        resp = HTTP_SESSION.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            timeout=4,
+        )
+        resp.raise_for_status()
+    except Exception as exc:
+        DDG_FAILURE_COUNT += 1
+        if DDG_FAILURE_COUNT >= 2:
+            DDG_BACKOFF_UNTIL = time.time() + 300
+        print(f"HTTP DDG Hata [{query}]: {exc}")
+        return []
+
+    DDG_FAILURE_COUNT = 0
+    DDG_BACKOFF_UNTIL = 0.0
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    parsed_results = []
+    for link in soup.select("a.result__a, a.result-link")[:15]:
+        href = link.get("href", "")
+        container = link.find_parent(class_="result") or link.parent
+        snippet_el = container.select_one(".result__snippet") if container else None
+        parsed_results.append({
+            "title": link.get_text(" ", strip=True),
+            "href": href,
+            "body": snippet_el.get_text(" ", strip=True) if snippet_el else "",
+        })
+
+    return _store_cached_results("ddg", query, parsed_results)
+
+
+def search_engine_results(query, country="", allow_ddg=True):
+    """Combine search providers without hammering every engine every time."""
+    combined = []
+    seen_urls = set()
+
+    def add_entries(entries):
+        for entry in entries:
+            href = unwrap_search_result_url(entry.get("href", ""))
+            if not href or href in seen_urls:
+                continue
+            seen_urls.add(href)
+            combined.append({
+                "title": entry.get("title", ""),
+                "href": href,
+                "body": entry.get("body", ""),
+            })
+
+    brave_results = fetch_brave_results_http(query)
+    add_entries(brave_results[:12])
+
+    if len(combined) < 6:
+        add_entries(fetch_bing_results_http(query, country)[:12])
+
+    if allow_ddg and len(combined) < 8:
+        add_entries(fetch_ddg_results_http(query)[:10])
+
+    return combined
+
+
+def linkedin_url_is_rejectable(url):
+    """Reject non-company or tracking-heavy LinkedIn URLs."""
+    lower_url = (url or "").lower()
+    return any(
+        token in lower_url
+        for token in [
+            "/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/",
+            "/feed/", "/groups/", "/events/", "/school/", "/showcase/", "/redir/",
+            "trk=", "tracking", "redirect"
+        ]
+    )
+
+
+def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", sector="", location="", country="", li_at="", title_hint="", website_hint=""):
+    """Keep only LinkedIn company pages that look live and relevant to the requested product."""
+    normalized_url = normalize_linkedin_company_url(linkedin_url)
+    if not normalized_url or linkedin_url_is_rejectable(normalized_url):
+        return None
+
+    profile = fetch_linkedin_company_profile_http(
+        normalized_url,
+        li_at=li_at,
+        expected_name=company_name,
+    )
+    if not profile:
+        return None
+
+    combined_parts = [
+        profile.get("company_name", ""),
+        profile.get("summary", ""),
+        title_hint or "",
+    ]
+
+    session = build_http_session(li_at=li_at)
+    for page_url in [profile["linkedin_url"], profile["linkedin_url"].rstrip("/") + "/about/"]:
+        try:
+            response = session.get(page_url, timeout=LINKEDIN_HTTP_TIMEOUT, allow_redirects=True)
+            response.raise_for_status()
+        except Exception:
+            continue
+
+        page_html = response.text or ""
+        low_html = page_html.lower()
+        if response.status_code != 200 or "authwall" in low_html or "security verification" in low_html:
+            continue
+
+        soup = BeautifulSoup(page_html, "html.parser")
+        page_title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        page_text = trafilatura.extract(page_html, include_comments=False, include_tables=False) or soup.get_text(" ", strip=True)
+        page_text = " ".join(page_text.split())[:3500]
+        combined_parts.extend([page_title, page_text])
+
+    combined_text = " ".join(part for part in combined_parts if part)
+    combined_fold = fold_text(combined_text)
+    sector_fold = fold_text(sector)
+    city_fold = fold_text(location)
+    country_fold = fold_text(country)
+    product_score = product_signal_score(keyword, combined_text)
+
+    reasons = []
+    score = 0
+    actual_name = profile.get("company_name", "") or company_name
+    name_match_score = score_company_website_match(
+        company_name or actual_name,
+        actual_name,
+        combined_text,
+        profile["linkedin_url"],
+    )
+    if company_name and normalize_company_identity(company_name) == normalize_company_identity(actual_name):
+        score += 35
+        reasons.append("exact name match")
+    elif name_match_score >= 24:
+        score += 20
+        reasons.append("name match")
+    else:
+        return None
+
+    if product_score >= 12:
+        score += 38
+        reasons.append("product matched")
+    else:
+        score += product_score
+
+    if sector_fold and sector_fold in combined_fold:
+        score += 12
+        reasons.append("industry matched")
+
+    if city_fold:
+        if city_fold in combined_fold:
+            score += 18
+            reasons.append("city matched")
+        else:
+            score -= 35
+    if country_fold and country_fold in combined_fold:
+        score += 8
+        reasons.append("country matched")
+
+    website_candidate = normalize_company_site_url(website_hint or profile.get("website_url", ""))
+    verified_website = None
+    if website_candidate:
+        verified_website = verify_company_homepage(
+            {
+                "company_name": actual_name,
+                "website": website_candidate,
+                "score": 0,
+                "snippet": profile.get("summary", "") or title_hint or "",
+            },
+            keyword,
+            sector,
+            location=location,
+            country=country,
+        )
+        if verified_website:
+            score += 26
+            reasons.append("website verified")
+
+    if company_footprint_score(combined_text) < 6 and not verified_website:
+        return None
+
+    if keyword and product_score < 8 and not verified_website:
+        return None
+
+    if score < 55:
+        return None
+
+    return {
+        "company_name": actual_name,
+        "linkedin_url": profile["linkedin_url"],
+        "website_url": (verified_website.get("website") if verified_website else website_candidate) or "",
+        "title": title_hint or profile.get("summary", ""),
+        "score": score,
+        "match_reasons": reasons,
+    }
+
+
+def looks_like_directory_listing(title, snippet, url, page_text=""):
+    """Reject directory/marketplace pages that list companies instead of being one."""
+    if host_is_directory(url):
+        return True
+
+    haystack = fold_text(f"{title} {snippet} {page_text} {url}")
+    if not haystack:
+        return False
+
+    if any(token in haystack for token in DIRECTORYISH_TOKENS):
+        if not any(token in haystack for token in COMPANY_PAGE_HINT_TOKENS):
+            return True
+
+    return False
+
+
+def search_term_tokens(text, min_len=3):
+    """Tokenize free-text queries without company-specific stopwords."""
+    tokens = [token for token in re.split(r"[^a-z0-9]+", fold_text(text)) if len(token) >= min_len]
+    generic = {
+        "and", "the", "for", "with", "from", "official", "company", "firma",
+        "ltd", "sti", "sanayi", "ticaret"
+    }
+    return [token for token in tokens if token not in generic]
+
+
+def product_signal_score(keyword, text):
+    """Measure whether the requested product truly appears in the candidate text."""
+    keyword_fold = fold_text(keyword)
+    haystack = fold_text(text)
+    if not keyword_fold:
+        return 0
+    if re.search(rf"\b{re.escape(keyword_fold)}\b", haystack):
+        return 30
+
+    kw_tokens = set(search_term_tokens(keyword))
+    hay_tokens = set(search_term_tokens(text))
+    if not kw_tokens:
+        return 0
+
+    overlap = len(kw_tokens & hay_tokens)
+    if len(kw_tokens) >= 2:
+        if overlap >= 2:
+            return 18 + overlap * 4
+        if overlap == 1:
+            return -18
+        return -36
+
+    return 12 if overlap else -18
+
+
+def company_footprint_score(text):
+    """Reward pages that look like actual company websites."""
+    haystack = fold_text(text)
+    score = 0
+    footprint_tokens = [
+        "hakkimizda", "about us", "about company", "corporate", "kurumsal",
+        "iletisim", "contact", "contact us", "urunler", "products", "services",
+        "catalog", "catalogue", "solution", "cozum", "manufacturer", "supplier",
+        "ltd", "sti", "a s", "inc", "llc", "gmbh", "sanayi", "ticaret"
+    ]
+    for token in footprint_tokens:
+        if token in haystack:
+            score += 6
+    return score
+
+
+def looks_like_media_or_entertainment_page(title, snippet, url, page_text=""):
+    """Reject movie/music/news entertainment pages that happen to share product words."""
+    haystack = fold_text(f"{title} {snippet} {page_text} {url}")
+    media_tokens = [
+        "film", "movie", "cinema", "sinema", "dizi", "series", "episode",
+        "fragman", "trailer", "izle", "watch online", "imdb", "beyazperde",
+        "netflix", "prime video", "box office", "soundtrack", "lyrics", "torrent"
+    ]
+    return any(token in haystack for token in media_tokens)
+
+
+def looks_like_article_or_info_page(title, snippet, url):
+    """Filter out news/info/directory pages instead of company homes."""
+    haystack = fold_text(f"{title} {snippet} {url}")
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    path = urlparse(url or "").path.lower()
+    if any(token in host for token in NON_COMPANY_HOST_TOKENS):
+        return True
+    if any(token in path for token in BAD_PATH_TOKENS):
+        return True
+    if looks_like_directory_listing(title, snippet, url):
+        return True
+    if looks_like_media_or_entertainment_page(title, snippet, url):
+        return True
+    return any(token in haystack for token in ARTICLEISH_TOKENS)
+
+
+def looks_like_company_result(title, snippet, url, is_li=False):
+    """Keep only pages that still look like company results after cleanup."""
+    haystack = fold_text(f"{title} {snippet} {url}")
+    parsed = urlparse(url or "")
+    host = parsed.netloc.lower().replace("www.", "")
+    path = parsed.path.lower()
+
+    if not is_li and any(token in path for token in BAD_PATH_TOKENS):
+        return False
+    if any(host.startswith(f"{prefix}.") for prefix in BAD_SUBDOMAIN_PREFIXES):
+        return False
+    if looks_like_article_or_info_page(title, snippet, url):
+        return False
+    if looks_like_directory_listing(title, snippet, url):
+        return False
+    if any(token in haystack for token in QUESTIONISH_TOKENS) and not any(token in haystack for token in COMPANY_HINT_TOKENS):
+        return False
+
+    return True
+
+
+def verify_company_homepage(candidate, keyword, sector, location="", country=""):
+    """Validate a company by combining the root domain with product-page evidence."""
+    deadline = time.time() + 12
+    website_url = normalize_company_site_url(candidate.get("website", ""))
+    if not website_url:
+        return None
+    if looks_like_article_or_info_page(candidate.get("company_name", ""), candidate.get("snippet", ""), website_url):
+        return None
+
+    session = build_http_session()
+    keyword_link_tokens = search_term_tokens(keyword, min_len=4)
+    sector_link_tokens = search_term_tokens(sector, min_len=4)
+    city_tokens = [fold_text(location)] if location else []
+    country_tokens = country_location_tokens(country)
+    target_country_code = country_code_for(country)
+    target_country_tld = country_tld_for(country)
+
+    def build_page_evidence(final_page_url, title, body_text, raw_links, location_text=""):
+        final_host = urlparse(final_page_url).netloc.lower().replace("www.", "")
+        clean_title = " ".join((title or "").split())
+        clean_text = " ".join((body_text or "").split())[:2600]
+        clean_location_text = " ".join((location_text or "").split())[:2200]
+        if not clean_title and not clean_text and not clean_location_text:
+            return None
+
+        links = []
+        seen_links = set()
+        for row in raw_links or []:
+            absolute_url = unwrap_search_result_url((row.get("url") or "").strip())
+            if not absolute_url or not absolute_url.startswith("http"):
+                continue
+            absolute_host = urlparse(absolute_url).netloc.lower().replace("www.", "")
+            if absolute_host != final_host or url_looks_like_asset(absolute_url):
+                continue
+            path = urlparse(absolute_url).path.lower()
+            if path in {"", "/"} or absolute_url in seen_links:
+                continue
+
+            anchor_text = " ".join(((row.get("text") or "")).split())
+            link_blob = fold_text(f"{anchor_text} {absolute_url}")
+            product_link_score = 0
+            location_link_score = 0
+            if any(token in link_blob for token in keyword_link_tokens):
+                product_link_score += 34
+            if any(token in link_blob for token in sector_link_tokens):
+                product_link_score += 10
+            if any(token in link_blob for token in ["urun", "product", "products", "kategori", "category", "cozum", "solution", "disli", "gear", "worm", "reductor", "redaktor", "catalog"]):
+                product_link_score += 14
+            if any(token in link_blob for token in city_tokens):
+                location_link_score += 34
+            if any(token in link_blob for token in country_tokens):
+                location_link_score += 24
+            if any(token in link_blob for token in LOCATION_PAGE_HINT_TOKENS):
+                location_link_score += 18
+            if any(token in link_blob for token in LOCATION_ROLE_HINT_TOKENS):
+                location_link_score += 10
+            if target_country_tld and target_country_tld in absolute_url.lower():
+                location_link_score += 12
+            if target_country_code and any(token in absolute_url.lower() for token in [f"/{target_country_code.lower()}/", f"-{target_country_code.lower()}/"]):
+                location_link_score += 10
+            if looks_like_article_or_info_page(anchor_text, "", absolute_url):
+                product_link_score -= 24
+                location_link_score -= 12
+
+            link_score = product_link_score + location_link_score
+            if link_score <= 0:
+                continue
+
+            seen_links.add(absolute_url)
+            links.append({
+                "url": absolute_url,
+                "text": anchor_text,
+                "score": link_score,
+                "product_score": product_link_score,
+                "location_score": location_link_score,
+            })
+        links = sorted(links, key=lambda item: (item["score"], item["location_score"], item["product_score"]), reverse=True)[:12]
+
+        return {
+            "url": final_page_url,
+            "title": clean_title,
+            "text": clean_text,
+            "location_text": clean_location_text,
+            "snippet": (clean_title or clean_text[:220] or clean_location_text[:220]).strip(),
+            "links": links,
+        }
+
+    def fetch_page_evidence(url, require_host=""):
+        if time.time() >= deadline:
+            return None
+        raw_url = unwrap_search_result_url(url)
+        if not raw_url or not raw_url.startswith("http"):
+            return None
+
+        openclaw_snapshot = openclaw_fetch_page_snapshot(raw_url, require_host=require_host)
+        if openclaw_snapshot:
+            return build_page_evidence(
+                openclaw_snapshot.get("url", raw_url),
+                openclaw_snapshot.get("title", ""),
+                openclaw_snapshot.get("text", ""),
+                openclaw_snapshot.get("links", []),
+                location_text=openclaw_snapshot.get("locationText", ""),
+            )
+
+        try:
+            resp = session.get(raw_url, timeout=VERIFY_HTTP_TIMEOUT, allow_redirects=True)
+            resp.raise_for_status()
+        except Exception:
+            return None
+
+        final_page_url = resp.url or raw_url
+        final_host = urlparse(final_page_url).netloc.lower().replace("www.", "")
+        if require_host and final_host != require_host:
+            return None
+
+        html_doc = resp.text or ""
+        soup = BeautifulSoup(html_doc, "html.parser")
+        title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        body_text = trafilatura.extract(html_doc, include_comments=False, include_tables=False) or soup.get_text(" ", strip=True)
+
+        raw_links = []
+        for anchor in soup.select("a[href]"):
+            href = (anchor.get("href") or "").strip()
+            if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                continue
+            raw_links.append({
+                "url": urljoin(final_page_url, href),
+                "text": anchor.get_text(" ", strip=True) or anchor.get("aria-label", "") or anchor.get("title", ""),
+            })
+
+        location_parts = []
+        location_parts.extend(
+            " ".join(node.get_text(" ", strip=True).split())
+            for node in soup.select(
+                "address, footer, [class*='contact'], [class*='location'], [class*='office'], [class*='branch'], [class*='dealer'], [class*='distributor'], [id*='contact'], [id*='location'], [id*='office'], [id*='branch'], [itemprop='address'], [itemprop='addressCountry']"
+            )[:16]
+        )
+        location_parts.extend(
+            " ".join(
+                f"{node.get('name') or node.get('property') or ''} {node.get('content') or ''}".split()
+            )
+            for node in soup.select("meta[name], meta[property]")[:40]
+        )
+        location_parts.extend(
+            " ".join((node.get_text(" ", strip=True) or "").split())
+            for node in soup.select("script[type='application/ld+json']")[:8]
+        )
+        return build_page_evidence(final_page_url, title, body_text, raw_links, location_text=" ".join(location_parts))
+
+    root_page = fetch_page_evidence(website_url)
+    if not root_page:
+        return None
+
+    final_url = normalize_company_site_url(root_page.get("url") or website_url)
+    if not final_url:
+        return None
+
+    root_title = root_page.get("title", "")
+    root_text = root_page.get("text", "")
+    final_host = urlparse(final_url).netloc.lower().replace("www.", "")
+
+    if looks_like_article_or_info_page(root_title, root_text[:300], final_url):
+        return None
+    if looks_like_directory_listing(root_title, candidate.get("snippet", ""), final_url, page_text=root_text[:600]):
+        return None
+    if looks_like_media_or_entertainment_page(root_title, candidate.get("snippet", ""), final_url, page_text=root_text[:600]):
+        return None
+
+    pages = [root_page]
+    source_page = None
+    source_url = unwrap_search_result_url(candidate.get("source_url") or "")
+    if source_url and normalize_company_site_url(source_url) == final_url and source_url.rstrip("/") != final_url.rstrip("/"):
+        fetched_source = fetch_page_evidence(source_url, require_host=final_host)
+        if fetched_source and not looks_like_directory_listing(
+            fetched_source.get("title", ""),
+            candidate.get("snippet", ""),
+            fetched_source.get("url", ""),
+            page_text=fetched_source.get("text", "")[:600],
+        ) and not looks_like_media_or_entertainment_page(
+            fetched_source.get("title", ""),
+            candidate.get("snippet", ""),
+            fetched_source.get("url", ""),
+            page_text=fetched_source.get("text", "")[:600],
+        ):
+            source_page = fetched_source
+            pages.append(source_page)
+
+    k_fold = fold_text(keyword)
+    s_fold = fold_text(sector)
+    city_fold = fold_text(location)
+    country_fold = fold_text(country)
+    common_company_paths = [
+        "/iletisim", "/contact", "/contact-us", "/hakkimizda", "/about", "/kurumsal", "/corporate", "/company",
+        "/locations", "/location", "/where-to-buy", "/dealers", "/distributors", "/offices", "/branches",
+        "/network", "/partners", "/subeler", "/bayiler", "/ofisler",
+    ]
+    if target_country_code:
+        common_company_paths.extend([
+            f"/{target_country_code.lower()}/",
+            f"/{target_country_code.lower()}",
+        ])
+
+    initial_combined = " ".join(
+        part
+        for part in [
+            candidate.get("company_name", ""),
+            candidate.get("snippet", ""),
+            root_title,
+            root_text,
+            source_page.get("title", "") if source_page else "",
+            source_page.get("text", "") if source_page else "",
+            final_url,
+        ]
+        if part
+    )
+    needs_context_page = (
+        company_footprint_score(initial_combined) < 6
+        or (city_fold and city_fold not in fold_text(initial_combined))
+    )
+
+    company_context_page = None
+    if needs_context_page:
+        for suffix in common_company_paths[:6]:
+            probe_url = urljoin(final_url, suffix)
+            fetched_page = fetch_page_evidence(probe_url, require_host=final_host)
+            if not fetched_page:
+                continue
+            if normalize_company_site_url(fetched_page.get("url", "")) != final_url:
+                continue
+            if looks_like_directory_listing(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+            if looks_like_media_or_entertainment_page(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+            company_context_page = fetched_page
+            pages.append(company_context_page)
+            break
+
+    seed_product_score = max(
+        product_signal_score(keyword, candidate.get("snippet", "")),
+        product_signal_score(
+            keyword,
+            " ".join(
+                part
+                for part in [
+                    root_title,
+                    root_text,
+                    source_page.get("title", "") if source_page else "",
+                    source_page.get("text", "") if source_page else "",
+                ]
+                if part
+            ),
+        ),
+    )
+    if keyword and seed_product_score < 8:
+        candidate_links = []
+        for page in [source_page, root_page, company_context_page]:
+            if not page:
+                continue
+            candidate_links.extend(page.get("links", []))
+        for link in sorted(candidate_links, key=lambda item: item.get("score", 0), reverse=True)[:2]:
+            if time.time() >= deadline:
+                break
+            fetched_page = fetch_page_evidence(link.get("url", ""), require_host=final_host)
+            if not fetched_page:
+                continue
+            if looks_like_directory_listing(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+            if looks_like_media_or_entertainment_page(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+
+            fetched_product_score = product_signal_score(
+                keyword,
+                " ".join(
+                    part
+                    for part in [fetched_page.get("title", ""), fetched_page.get("text", ""), fetched_page.get("url", "")]
+                    if part
+                ),
+            )
+            if fetched_product_score <= seed_product_score:
+                continue
+            source_page = fetched_page
+            seed_product_score = fetched_product_score
+            pages.append(source_page)
+            if fetched_product_score >= 18:
+                break
+
+    location_pages = []
+    if city_tokens or country_tokens:
+        location_candidates = []
+        seen_location_links = set()
+        for page in [company_context_page, source_page, root_page]:
+            if not page:
+                continue
+            for link in page.get("links", []):
+                if link.get("location_score", 0) <= 0:
+                    continue
+                if link["url"] in seen_location_links:
+                    continue
+                seen_location_links.add(link["url"])
+                location_candidates.append(link)
+
+        for link in sorted(location_candidates, key=lambda item: (item.get("location_score", 0), item.get("score", 0)), reverse=True)[:2]:
+            if time.time() >= deadline:
+                break
+            fetched_page = fetch_page_evidence(link.get("url", ""), require_host=final_host)
+            if not fetched_page:
+                continue
+            if normalize_company_site_url(fetched_page.get("url", "")) != final_url:
+                continue
+            if looks_like_directory_listing(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+            if looks_like_media_or_entertainment_page(
+                fetched_page.get("title", ""),
+                candidate.get("snippet", ""),
+                fetched_page.get("url", ""),
+                page_text=fetched_page.get("text", "")[:600],
+            ):
+                continue
+            location_pages.append(fetched_page)
+            pages.append(fetched_page)
+
+    combined = " ".join(
+        part
+        for page in pages
+        for part in [page.get("title", ""), page.get("text", ""), page.get("url", "")]
+        if part
+    )
+    combined = " ".join(
+        part
+        for part in [candidate.get("company_name", ""), candidate.get("snippet", ""), combined, final_url]
+        if part
+    )
+    combined_fold = fold_text(combined)
+    company_context = " ".join(
+        part
+        for part in [
+            candidate.get("company_name", ""),
+            root_title,
+            root_text,
+            company_context_page.get("title", "") if company_context_page else "",
+            company_context_page.get("text", "") if company_context_page else "",
+            final_url,
+        ]
+        if part
+    )
+    product_context = " ".join(
+        part
+        for part in [
+            candidate.get("snippet", ""),
+            source_page.get("title", "") if source_page else "",
+            source_page.get("text", "") if source_page else "",
+            root_title,
+            root_text[:800],
+        ]
+        if part
+    )
+    location_context = " ".join(
+        part
+        for page in [source_page, company_context_page, *location_pages, root_page]
+        if page
+        for part in [
+            page.get("title", ""),
+            page.get("location_text", ""),
+            page.get("text", "")[:900],
+            page.get("url", ""),
+        ]
+        if part
+    )
+    location_context_fold = fold_text(location_context)
+
+    name_overlap = company_token_set(candidate.get("company_name", "")) & company_token_set(
+        f"{company_context} {extract_company_name_from_url(final_url)}"
+    )
+    product_score = max(
+        product_signal_score(keyword, candidate.get("snippet", "")),
+        product_signal_score(keyword, product_context),
+        product_signal_score(keyword, combined),
+    )
+    footprint_score = company_footprint_score(company_context)
+    seller_score = seller_intent_score(company_context)
+    city_hit = bool(city_fold and city_fold in location_context_fold)
+    country_hit = bool(country_tokens and any(token in location_context_fold for token in country_tokens))
+    location_role_hit = any(token in location_context_fold for token in LOCATION_ROLE_HINT_TOKENS)
+    location_page_hit = any(token in location_context_fold for token in LOCATION_PAGE_HINT_TOKENS)
+    conflicting_city = ""
+    if city_fold and country_fold in {"turkiye", "turkey", "tr"}:
+        turkish_city_tokens = {
+            fold_text(name)
+            for name in [
+                "Adana", "Adiyaman", "Afyonkarahisar", "Agri", "Aksaray", "Amasya", "Ankara", "Antalya",
+                "Ardahan", "Artvin", "Aydin", "Balikesir", "Bartin", "Batman", "Bayburt", "Bilecik",
+                "Bingol", "Bitlis", "Bolu", "Burdur", "Bursa", "Canakkale", "Cankiri", "Corum",
+                "Denizli", "Diyarbakir", "Duzce", "Edirne", "Elazig", "Erzincan", "Erzurum",
+                "Eskisehir", "Gaziantep", "Giresun", "Gumushane", "Hakkari", "Hatay", "Igdir", "Isparta",
+                "Istanbul", "Izmir", "Kahramanmaras", "Karabuk", "Karaman", "Kars", "Kastamonu",
+                "Kayseri", "Kirikkale", "Kirklareli", "Kirsehir", "Kilis", "Kocaeli", "Konya", "Kutahya",
+                "Malatya", "Manisa", "Mardin", "Mersin", "Mugla", "Mus", "Nevsehir", "Nigde", "Ordu",
+                "Osmaniye", "Rize", "Sakarya", "Samsun", "Sanliurfa", "Siirt", "Sinop", "Sirnak",
+                "Sivas", "Tekirdag", "Tokat", "Trabzon", "Tunceli", "Usak", "Van", "Yalova", "Yozgat",
+                "Zonguldak",
+            ]
+        }
+        other_city_hits = sorted(
+            token for token in turkish_city_tokens
+            if token != city_fold and token in location_context_fold
+        )
+        conflicting_city = other_city_hits[0] if other_city_hits else ""
+
+    score = seller_score + footprint_score + product_score
+
+    if k_fold and k_fold in combined_fold and product_score < 30:
+        score += 18
+    if s_fold and s_fold in combined_fold:
+        score += 10
+    if city_hit:
+        score += 20
+    elif city_fold:
+        score -= 10 if conflicting_city else 2
+    if country_hit:
+        score += 14 if country_code_for(country) not in {"", "TR"} else 6
+    elif country_fold:
+        score -= 4
+    if location_role_hit:
+        score += 8
+    if location_page_hit:
+        score += 6
+    if target_country_tld and target_country_tld in final_url.lower():
+        score += 8
+    if name_overlap:
+        score += 18
+    if final_url.endswith(".tr/") or ".com.tr/" in final_url:
+        score += 6
+    if final_url.rstrip("/").count("/") <= 2:
+        score += 4
+    if city_hit and product_score >= 12:
+        score += 10
+    if country_hit and product_score >= 12:
+        score += 8
+
+    if keyword and product_score < 8:
+        return None
+
+    if footprint_score < 6 and seller_score < 18 and not name_overlap:
+        return None
+
+    if score < 32:
+        return None
+
+    verified = dict(candidate)
+    verified["company_name"] = best_company_name(
+        candidate.get("company_name", ""),
+        root_title,
+        source_page.get("title", "") if source_page else "",
+        extract_company_name_from_url(final_url),
+    )
+    verified["website"] = final_url
+    verified["score"] = candidate.get("score", 0) + score
+    verified["source_url"] = source_page.get("url", "") if source_page else candidate.get("source_url", "")
+    verified["snippet"] = (
+        (source_page.get("title", "") if source_page and product_score >= 12 else "")
+        or candidate.get("snippet", "")
+        or root_title
+        or root_text[:220]
+    )
+    return verified
+
+
+def find_company_website(company_name, keyword="", sector="", location="", country=""):
+    """Find the official website while avoiding news, directories, and profile pages."""
+    clean_name = best_company_name(company_name) or (company_name or "").strip()
+    if len(clean_name) < 2:
+        return None
+
+    target_tld = country_tld_for(country)
+    queries = dedupe_queries([
+        build_query(f"\"{clean_name}\"", location, country, "official website"),
+        build_query(f"\"{clean_name}\"", keyword, sector, location, country, "company"),
+        build_query(f"\"{clean_name}\"", keyword, sector, location, country, "official site"),
+        build_query(f"\"{clean_name}\"", location, country, "firma"),
+        build_query(f"\"{clean_name}\"", location, country, "kurumsal"),
+        build_query(f"site:{target_tld}", f"\"{clean_name}\"", "official") if target_tld else "",
+    ])
+
+    best = None
+    seen_urls = set()
+    for query in queries:
+        for entry in search_engine_results(query, country=country, allow_ddg=True):
+            url = unwrap_search_result_url(entry.get("href", ""))
+            lower_url = url.lower()
+            if not url or "linkedin.com" in lower_url or not is_allowed_domain(url):
+                continue
+
+            normalized_url = normalize_company_site_url(url)
+            if not normalized_url or normalized_url in seen_urls:
+                continue
+            seen_urls.add(normalized_url)
+
+            title = entry.get("title", "").strip() or extract_company_name_from_url(normalized_url)
+            snippet = entry.get("body", "").strip()
+            if not looks_like_company_result(title, snippet, normalized_url, is_li=False):
+                continue
+            if looks_like_directory_listing(title, snippet, normalized_url):
+                continue
+
+            score = score_company_website_match(clean_name, title, snippet, normalized_url)
+            haystack = fold_text(f"{title} {snippet} {normalized_url}")
+            if keyword and fold_text(keyword) in haystack:
+                score += 6
+            if sector and fold_text(sector) in haystack:
+                score += 4
+            if location:
+                if fold_text(location) in haystack:
+                    score += 8
+                else:
+                    score -= 18
+            if country and fold_text(country) in haystack:
+                score += 5
+            if urlparse(normalized_url).path in {"", "/"}:
+                score += 5
+
+            if score < 34:
+                continue
+
+            candidate = {
+                "company_name": best_company_name(clean_name, title, extract_company_name_from_url(normalized_url)),
+                "website": normalized_url,
+                "source_url": url,
+                "score": score,
+                "is_linkedin": False,
+                "snippet": snippet or f"Firma: {clean_name}",
+            }
+            if not best or score > best["score"]:
+                best = candidate
+
+        if best and best["score"] >= 88:
+            break
+
+    if best:
+        verified_best = verify_company_homepage(best, keyword, sector, location=location, country=country)
+        if verified_best:
+            return verified_best
+
+    guessed = guess_company_website(clean_name, country=country)
+    if guessed:
+        verified_guess = verify_company_homepage(guessed, keyword, sector, location=location, country=country)
+        if verified_guess:
+            return verified_guess
+        if not best or guessed["score"] >= best["score"]:
+            return guessed
+
+    return best
+
+
+def search_linkedin_company_pages_http(keyword, sector, location="", country="", limit=5, li_at=""):
+    """Search for LinkedIn company pages with cleaner names and fewer noisy queries."""
+    deadline = time.time() + 25
+    queries = dedupe_queries([
+        build_query("site:linkedin.com/company/", f"\"{keyword}\"", sector, location, country),
+        build_query("site:linkedin.com/company/", keyword, sector, location, country, "manufacturer"),
+        build_query("site:linkedin.com/company/", keyword, sector, location, country, "supplier"),
+        build_query("site:www.linkedin.com/company/", keyword, sector, location, country),
+    ])
+
+    found = {}
+    for query in queries:
+        if time.time() >= deadline or len(found) >= max(limit * 3, 8):
+            break
+        for entry in search_engine_results(query, country=country, allow_ddg=True):
+            if time.time() >= deadline or len(found) >= max(limit * 3, 8):
+                break
+            url = normalize_linkedin_company_url(entry.get("href", ""))
+            if not url:
+                continue
+            lower_url = url.lower()
+            if any(x in lower_url for x in ["/in/", "/people/", "/pub/", "/jobs/", "/pulse/", "/search/", "/posts/", "/feed/", "/groups/", "/events/", "/school/", "/showcase/"]):
+                continue
+
+            title = entry.get("title", "").strip()
+            snippet = entry.get("body", "").strip()
+            name = best_company_name(title, extract_company_name_from_url(url))
+            if len(name) < 2:
+                continue
+
+            score = score_candidate(
+                {"title": title, "body": snippet, "href": url},
+                keyword,
+                sector,
+                location,
+                country,
+            ) + 120
+
+            haystack = fold_text(f"{title} {snippet}")
+            if keyword and fold_text(keyword) in haystack:
+                score += 10
+            if sector and fold_text(sector) in haystack:
+                score += 6
+
+            if score < 40:
+                continue
+
+            if url not in found or score > found[url]["score"]:
+                found[url] = {
+                    "company_name": name,
+                    "linkedin_url": url,
+                    "title": snippet,
+                    "score": score,
+                }
+
+    ranked = sorted(found.values(), key=lambda item: item["score"], reverse=True)
+    final_results = []
+    for row in ranked[: max(limit + 1, 4)]:
+        if time.time() >= deadline:
+            break
+        validated = validate_linkedin_company_candidate(
+            row["company_name"],
+            row["linkedin_url"],
+            keyword=keyword,
+            sector=sector,
+            location=location,
+            country=country,
+            li_at=li_at,
+            title_hint=row["title"],
+            website_hint="",
+        )
+        if not validated:
+            continue
+        validated["score"] = validated.get("score", 0) + row["score"]
+        final_results.append(validated)
+        if len(final_results) >= limit:
+            break
+
+    return final_results
+
+
+def score_candidate(entry, keyword, sector, location, country):
+    """Score company intent with heavier penalties for info pages and directories."""
+    haystack = fold_text(f"{entry.get('title', '')} {entry.get('body', '')} {entry.get('href', '')}").strip()
+    if not haystack:
+        return 0
+
+    k_fold = fold_text(keyword)
+    s_fold = fold_text(sector)
+    city_fold = fold_text(location)
+    country_fold = fold_text(country)
+
+    score = 0
+    product_score = product_signal_score(keyword, haystack)
+    keyword_tokens = set(search_term_tokens(keyword))
+    haystack_tokens = set(search_term_tokens(haystack))
+    token_overlap = len(keyword_tokens & haystack_tokens)
+    score += product_score
+    if len(keyword_tokens) >= 2 and token_overlap >= 1:
+        score += 14
+    if s_fold and s_fold in haystack:
+        score += 6
+    score += seller_intent_score(haystack)
+    score += company_footprint_score(haystack)
+
+    if any(token in haystack for token in INDUSTRY_TOKENS):
+        score += 3
+    if any(token in haystack for token in ["manufacturer", "uretim", "uretici", "sanayi", "industrial", "fabrik"]):
+        score += 7
+
+    city_hit = bool(city_fold and city_fold in haystack)
+    country_hit = bool(country_fold and country_fold in haystack)
+    if city_hit:
+        score += 42
+    elif city_fold:
+        score -= 18
+    if country_hit:
+        score += 10
+
+    domain = entry.get("href", "").lower()
+    c_fold = country.lower().strip()
+    is_foreign = c_fold not in ["turkiye", "turkey", "tr"]
+
+    if (".tr" in domain or ".com.tr" in domain) and "linkedin.com" not in domain:
+        if is_foreign:
+            score -= 60
+        else:
+            score += 12
+            country_hit = True
+
+    target_tld = TLD_MAP.get(c_fold, "")
+    if not target_tld and is_foreign:
+        c_code = ISO_COUNTRY_MAP.get(c_fold, "").lower()
+        if c_code:
+            target_tld = f".{c_code}"
+    if target_tld and domain.endswith(target_tld):
+        score += 18
+        country_hit = True
+
+    if country_fold and not country_hit:
+        score -= 4
+
+    if any(x in domain for x in ["/in/", "/pub/", "/people/"]):
+        score -= 100
+    if host_is_directory(entry.get("href", "")) or looks_like_directory_listing(entry.get("title", ""), entry.get("body", ""), entry.get("href", "")):
+        score -= 160
+    if looks_like_media_or_entertainment_page(entry.get("title", ""), entry.get("body", ""), entry.get("href", "")):
+        score -= 220
+    if looks_like_article_or_info_page(entry.get("title", ""), entry.get("body", ""), entry.get("href", "")):
+        score -= 120
+    if urlparse(entry.get("href", "")).path in {"", "/"} and "linkedin.com" not in domain:
+        score += 8
+    if keyword and product_score < 0:
+        score -= 12 if token_overlap else 30
+
+    return score
+
+
+def search_web_companies(keyword, sector, location="", country="", limit=6):
+    """Find seller/company websites and verify them before surfacing results."""
+    deadline = time.time() + 40
+    target_tld = country_tld_for(country)
+    q_loc = f"\"{location}\"" if location else ""
+    negations = "-news -blog -article -wiki -pdf -datasheet -manual -jobs -career -careers -film -movie -dizi -izle -fragman"
+    country_fold = fold_text(country)
+    product_phrase = f"\"{keyword}\"" if keyword else ""
+    ascii_keyword = fold_text(keyword)
+    product_tokens = search_term_tokens(keyword, min_len=4)
+    token_phrase = " ".join(f"\"{token}\"" for token in product_tokens[:3]) if len(product_tokens) >= 2 else ""
+    focus_tokens = dedupe_queries([
+        f"\"{product_tokens[-1]}\"" if product_tokens else "",
+        product_tokens[-1] if product_tokens else "",
+        f"\"{max(product_tokens, key=len)}\"" if len(product_tokens) >= 2 else "",
+        max(product_tokens, key=len) if len(product_tokens) >= 2 else "",
+    ])
+    turkish_query_variants = []
+    turkish_focus_tokens = []
+    if country_fold in {"turkiye", "turkey", "tr"} and keyword and keyword.isascii():
+        turkish_map = {"c": "ç", "g": "ğ", "o": "ö", "s": "ş", "u": "ü"}
+        raw_tokens = [token for token in re.split(r"\s+", keyword.strip()) if len(token) >= 3]
+        focus_source_tokens = set()
+        if raw_tokens:
+            focus_source_tokens.add(raw_tokens[-1].lower())
+        for idx, token in enumerate(raw_tokens[:4]):
+            token_variants = []
+            lower_token = token.lower()
+            for pos, char in enumerate(lower_token):
+                mapped = turkish_map.get(char)
+                if not mapped:
+                    continue
+                variant = token[:pos] + mapped + token[pos + 1:]
+                if variant != token and variant not in token_variants:
+                    token_variants.append(variant)
+            for variant in token_variants[:4]:
+                joined = list(raw_tokens)
+                joined[idx] = variant
+                variant_query = " ".join(joined)
+                turkish_query_variants.append(variant_query)
+                turkish_query_variants.append(f"\"{variant_query}\"")
+                if lower_token in focus_source_tokens:
+                    turkish_focus_tokens.append(variant)
+                    turkish_focus_tokens.append(f"\"{variant}\"")
+    keyword_variants = dedupe_queries([
+        product_phrase,
+        keyword,
+        f"\"{ascii_keyword}\"" if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
+        ascii_keyword if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
+        token_phrase,
+        *focus_tokens,
+        *turkish_focus_tokens,
+        *turkish_query_variants,
+    ])
+
+    if country_fold in {"turkiye", "turkey", "tr"}:
+        legal_terms = ["ltd", "sti", "a.s", "sanayi", "ticaret", "kurumsal", "iletisim", "hakkimizda"]
+        seller_terms = ["firma", "sirket", "uretici", "imalatci", "tedarikci", "satici", "sanayi", "kurumsal", "urunler"]
+    else:
+        legal_terms = ["inc", "llc", "gmbh", "company", "corporate", "official", "contact", "about"]
+        seller_terms = ["company", "manufacturer", "supplier", "factory", "distributor", "official", "corporate", "contact", "products"]
+    localized_terms = country_query_terms(country)
+
+    strict_queries = []
+    fallback_queries = []
+    for kw in keyword_variants or [product_phrase or keyword]:
+        strict_queries.extend([
+            build_query(kw, sector, q_loc, country, seller_terms[0], negations),
+            build_query(kw, sector, q_loc, country, seller_terms[1], negations),
+            build_query(kw, sector, q_loc, country, seller_terms[2], negations),
+            build_query(kw, q_loc, country, legal_terms[0], legal_terms[1], negations),
+            build_query(kw, q_loc, country, legal_terms[2], legal_terms[3], negations),
+            build_query(kw, q_loc, country, seller_terms[6], seller_terms[8], negations),
+        ])
+        fallback_queries.extend([
+            build_query(kw, sector, country, seller_terms[1], negations),
+            build_query(kw, sector, country, seller_terms[2], negations),
+            build_query(kw, country, seller_terms[0], seller_terms[6], negations),
+            build_query(kw, seller_terms[3], seller_terms[8], negations),
+            build_query(kw, legal_terms[4], legal_terms[5], negations),
+            build_query(kw, legal_terms[6], legal_terms[7], negations),
+        ])
+        for local_term in localized_terms[:6]:
+            strict_queries.append(build_query(kw, sector, q_loc, country, local_term, negations))
+            fallback_queries.append(build_query(kw, country, local_term, negations))
+        if target_tld:
+            strict_queries.extend([
+                build_query(f"site:{target_tld}", kw, q_loc, seller_terms[1], legal_terms[0]),
+                build_query(f"site:{target_tld}", kw, sector, q_loc, seller_terms[2]),
+            ])
+            fallback_queries.append(build_query(f"site:{target_tld}", kw, country, seller_terms[0]))
+
+    final_results = {}
+    verified_results = []
+    seen_domains = set()
+
+    def collect_candidates(queries, budget, query_cap):
+        for query in dedupe_queries(queries)[:query_cap]:
+            if time.time() >= deadline or len(final_results) >= budget:
+                break
+            for entry in search_engine_results(query, country=country, allow_ddg=True):
+                if time.time() >= deadline or len(final_results) >= budget:
+                    break
+                store_candidate(
+                    final_results,
+                    entry.get("title", ""),
+                    entry.get("href", ""),
+                    entry.get("body", ""),
+                    keyword,
+                    sector,
+                    location,
+                    country,
+                )
+                if len(final_results) >= budget:
+                    break
+
+    def append_verified_results():
+        for candidate in sorted(final_results.values(), key=lambda item: item["score"], reverse=True)[: max(limit * 3, 9)]:
+            if time.time() >= deadline:
+                break
+            verified = verify_company_homepage(candidate, keyword, sector, location=location, country=country)
+            if not verified:
+                continue
+            host = urlparse(verified.get("website", "")).netloc.lower()
+            if host in seen_domains:
+                continue
+            seen_domains.add(host)
+            verified_results.append(verified)
+            if len(verified_results) >= limit:
+                break
+
+    collect_candidates(strict_queries, max(limit * 5, 18), 10)
+    append_verified_results()
+    if len(verified_results) < limit and time.time() < deadline:
+        collect_candidates(fallback_queries, max(limit * 7, 24), 8)
+        append_verified_results()
+
+    return verified_results[:limit]

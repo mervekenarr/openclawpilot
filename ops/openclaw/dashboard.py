@@ -4,12 +4,21 @@ import json
 import time
 import requests
 import re
-from engine import search_web_companies, search_linkedin_companies, read_website_content, find_company_website
+import base64
+from urllib.parse import urlparse
+from pathlib import Path
+from engine import (
+    search_web_companies,
+    search_linkedin_companies,
+    read_website_content,
+)
 import pandas as pd
 import io
 
 # Ayar Dosyası Yolu
 ENV_PATH = ".env"
+APP_DIR = Path(__file__).resolve().parent
+LOGO_PATH = APP_DIR / "assets" / "logo.png"
 HTTP_SESSION = requests.Session()
 HTTP_SESSION.trust_env = False
 
@@ -63,10 +72,74 @@ def save_secure_setting(key, value):
 def normalize_company_key(name):
     """Farkli kaynaklardaki firma adlarini tek anahtarda toplar."""
     raw = (name or "").split("-")[0].split("|")[0].strip().lower()
+    raw = re.sub(r"\b(?:inc|ltd|llc|corp|co|company|holding|group|san|tic|as|a s|a\\.s|sti|sirketi|limited)\b", " ", raw)
     raw = re.sub(r"[^a-z0-9]+", " ", raw)
     return " ".join(raw.split())
 
+
+def fallback_name_from_url(url):
+    """Uzun veya kirli basliklarda hosttan daha okunur firma adi uret."""
+    parsed = urlparse(url or "")
+    host = parsed.netloc.lower().replace("www.", "")
+    if "linkedin.com" in host and parsed.path:
+        parts = [part for part in parsed.path.strip("/").split("/") if part]
+        label = parts[-1] if parts else ""
+    else:
+        label = host.split(".")[0] if host else ""
+    label = re.sub(r"[-_]+", " ", label).strip()
+    return label.title()
+
+
+def display_company_name(name, url=""):
+    """Ekranda devasa basliklar yerine kisa ve okunur firma adi goster."""
+    clean = re.sub(r"\s+", " ", (name or "")).strip(" |-")
+    fallback = fallback_name_from_url(url)
+    words = clean.split()
+    if not clean:
+        clean = fallback
+        words = clean.split()
+
+    low_words = [word.lower() for word in words]
+    noisy_name = (
+        len(words) > 4
+        or len(clean) > 70
+        or sum(1 for word in words if len(word) <= 2) >= 2
+        or any(token in low_words[:4] for token in ["izmir", "ankara", "istanbul", "mahallesi", "organize", "sanayi"])
+        or bool(re.search(r"\b\d{5,}\b", clean))
+    )
+
+    if noisy_name:
+        if fallback:
+            clean = fallback
+        else:
+            clean = " ".join(words[:4]).strip()
+    elif len(words) > 8 or len(clean) > 90:
+        if fallback:
+            clean = fallback
+        else:
+            clean = " ".join(words[:8]).strip()
+
+    return clean
+
+
+def compact_snippet(text, fallback_url=""):
+    """Sonuc aciklamasini kisa ve okunur halde tut."""
+    clean = re.sub(r"\s+", " ", (text or "")).strip()
+    if not clean:
+        return fallback_url
+    if len(clean) <= 180:
+        return clean
+    return clean[:177].rstrip() + "..."
+
+
+def load_logo_data_uri():
+    """Logo dosyasini base64 data URI olarak hazirlar."""
+    if not LOGO_PATH.exists():
+        return ""
+    return "data:image/png;base64," + base64.b64encode(LOGO_PATH.read_bytes()).decode()
+
 settings = load_secure_settings()
+LOGO_DATA_URI = load_logo_data_uri()
 
 # --- KEŞİF HAFIZASI & RAPORLAMA ---
 if "seen_urls" not in st.session_state:
@@ -241,16 +314,11 @@ session_token = settings.get("LINKEDIN_SESSION_TOKEN", "")
 # --- SİDEBAR DÜZENİ ---
 with st.sidebar:
     # LOGO YERLEŞİMİ (Tam Kontrol İçin HTML Kullanımı - Büyütme Butonunu Devre Dışı Bırakır)
-    if os.path.exists("assets/logo.png"):
-        import base64
-        with open("assets/logo.png", "rb") as f:
-            data = f.read()
-            b64_logo = base64.b64encode(data).decode()
-        
+    if LOGO_DATA_URI:
         st.markdown(
             f"""
             <div style="display: flex; justify-content: center; margin-bottom: 20px;">
-                <img src="data:image/png;base64,{b64_logo}" width="220" style="object-fit: contain;">
+                <img src="{LOGO_DATA_URI}" width="220" style="object-fit: contain;">
             </div>
             """,
             unsafe_allow_html=True
@@ -311,118 +379,131 @@ else:
         st.warning(f"⚡ **Smart Start: '{sector}' sektörü için farklı kaynaklar taranıyor...**")
         
         with st.status("🔍 Yeni Şirketler Keşfediliyor...", expanded=True) as status:
-            li_queries = [
-                f"site:linkedin.com/company/ \"{product}\" {sector} {selected_city} {selected_country}",
-                f"intitle:company site:linkedin.com/company/ \"{product}\" {selected_city}"
-            ]
-            # 1. LinkedIn Araması (Daha fazla sonuç çekip yeni olanları ayıklayacağız)
-            l_data = search_linkedin_companies(product, sector, f"{selected_city} {selected_country}".strip(), session_token, limit=15)
+            linkedin_target = 5
+            web_target = 5
+
+            # 1. LinkedIn Aramasi
+            l_data = search_linkedin_companies(
+                product,
+                sector,
+                selected_city,
+                li_at=session_token,
+                limit=max(linkedin_target + 2, 4),
+                country=selected_country,
+            )
             num_l = len(l_data) if isinstance(l_data, list) else 0
             linkedin_status = os.getenv("OPENCLAW_LAST_LINKEDIN_STATUS", "unknown")
             
-            # 2. Web Araması
-            target_total = 6
-            w_limit = max(target_total - num_l, 0)
-            w_data = search_web_companies(product, sector, selected_city, selected_country, limit=10) if w_limit > 0 else []
+            # 2. Web Aramasi
+            w_data = search_web_companies(product, sector, selected_city, selected_country, limit=max(web_target + 2, 6))
             
             status.update(label=f"✅ {num_l + len(w_data)} Potansiyel Şirket Keşfedildi", state="complete")
             if num_l == 0:
-                st.warning(f"LinkedIn şirket araması sonuç vermedi. Durum: {linkedin_status}")
+                st.info(f"LinkedIn şirket araması sonuç vermedi. Durum: {linkedin_status}")
             else:
                 st.caption(f"Kaynak dağılımı: LinkedIn={num_l}, Web={len(w_data)} | LinkedIn durumu: {linkedin_status}")
             
             # Yeni bir arama başladığında eski sonuçları temizle
             st.session_state.current_results = []
             
-            # --- DATA INTEGRATION & MEMORY FILTER (GÖRÜLMEMİŞLERİ SEÇ) ---
-            all_candidates = []
+            # --- KAYNAKLARI AYRI TUT: LinkedIn aramasi ile Web aramasi birbirine karismasin ---
+            linkedin_map = {}
             if isinstance(l_data, list):
                 for c in l_data:
-                    url = c.get("linkedin_url", "")
-                    if url in st.session_state.seen_urls: continue # Hafızada varsa atla
-                    
-                    is_garbage = any(x in url.lower() for x in ["/search/", "/people/", "/pub/", "/in/", "/jobs/", "/pulse/", "/posts/"])
-                    if not is_garbage and "linkedin.com/company/" in url.lower():
-                        all_candidates.append({
-                            "name": c.get("company_name"),
-                            "url": url,
-                            "is_li": True,
-                            "snippet": c.get("title", ""),
-                            "score": c.get("score", 0),
-                            "candidate_website": c.get("website_url", ""),
-                            "candidate_linkedin": url,
-                        })
-            
-            for c in w_data:
-                url = c.get("website", "")
-                if url in st.session_state.seen_urls: continue # Hafızada varsa atla
-                all_candidates.append({
-                    "name": c.get("company_name"),
-                    "url": url,
-                    "is_li": c.get("is_linkedin", False),
-                    "snippet": c.get("snippet", ""),
-                    "score": c.get("score", 0),
-                    "candidate_website": c.get("website", ""),
-                    "candidate_linkedin": "",
-                })
+                    linkedin_url = c.get("linkedin_url", "")
+                    if not linkedin_url or linkedin_url in st.session_state.seen_urls:
+                        continue
 
-            # İSME GÖRE TEKİLLEŞTİR (Ama LİNKEDİN OLAN KAZANSIN!)
-            final_map = {}
-            for cand in all_candidates:
-                name = cand["name"].split("-")[0].split("|")[0].strip()
-                if not name or len(name) < 2: continue
-                if name not in final_map:
-                    final_map[name] = cand
+                    lower_url = linkedin_url.lower()
+                    is_garbage = any(x in lower_url for x in ["/search/", "/people/", "/pub/", "/in/", "/jobs/", "/pulse/", "/posts/", "/feed/", "/groups/", "/events/", "/showcase/"])
+                    if is_garbage or "linkedin.com/company/" not in lower_url:
+                        continue
+
+                    name = display_company_name(c.get("company_name", ""), linkedin_url)
+                    match_key = normalize_company_key(name)
+                    if not match_key or len(name) < 2:
+                        continue
+
+                    candidate = {
+                        "source": "linkedin",
+                        "name": name,
+                        "snippet": c.get("title", ""),
+                        "score": c.get("score", 0),
+                        "website_url": c.get("website_url", ""),
+                        "linkedin_url": linkedin_url,
+                    }
+                    existing = linkedin_map.get(match_key)
+                    if not existing or candidate["score"] > existing["score"]:
+                        linkedin_map[match_key] = candidate
+
+            web_map = {}
+            for c in w_data:
+                website_url = c.get("website", "")
+                if not website_url or website_url in st.session_state.seen_urls:
                     continue
 
-                existing = final_map[name]
-                existing["candidate_website"] = existing.get("candidate_website", "") or cand.get("candidate_website", "")
-                existing["candidate_linkedin"] = existing.get("candidate_linkedin", "") or cand.get("candidate_linkedin", "")
-                existing["snippet"] = existing.get("snippet", "") or cand.get("snippet", "")
-                existing["score"] = max(existing.get("score", 0), cand.get("score", 0))
+                name = display_company_name(c.get("company_name", ""), website_url)
+                match_key = normalize_company_key(name)
+                if not match_key or len(name) < 2:
+                    continue
+                candidate = {
+                    "source": "web",
+                    "name": name,
+                    "snippet": c.get("snippet", ""),
+                    "score": c.get("score", 0),
+                    "website_url": website_url,
+                    "linkedin_url": "",
+                }
+                existing = web_map.get(match_key)
+                if not existing or candidate["score"] > existing["score"]:
+                    web_map[match_key] = candidate
 
-            # Yeni bulunanları hafızaya ekle (Max 6 tanesini gösterip hafızaya alacağız)
-            new_selection = sorted(
-                final_map.values(),
-                key=lambda item: (
-                    0 if (item.get("candidate_website") or not item["is_li"]) else 1,
-                    0 if item["is_li"] else 1,
-                    -item.get("score", 0),
-                    item["name"].lower(),
-                ),
-            )[:6]
-            for item in new_selection:
-                name = item["name"].split("-")[0].split("|")[0].strip()
-                item["website_url"] = item.get("candidate_website", "") or (item["url"] if not item["is_li"] else "")
-                item["linkedin_url"] = item.get("candidate_linkedin", "") or (item["url"] if item["is_li"] else "")
-                if not item["website_url"]:
-                    enriched = find_company_website(
-                        name,
-                        keyword=product,
-                        sector=sector,
-                        location=selected_city,
-                        country=selected_country,
-                    )
-                    if enriched:
-                        item["website_url"] = enriched.get("website", "")
-                        item["snippet"] = enriched.get("snippet", "") or item.get("snippet", "")
-                        item["score"] = max(item.get("score", 0), enriched.get("score", 0))
-                for url in [item["website_url"], item["linkedin_url"]]:
-                    if url:
-                        st.session_state.seen_urls.add(url)
-                selection_lookup[normalize_company_key(name)] = item
+            linkedin_selection = sorted(
+                linkedin_map.values(),
+                key=lambda item: (-item.get("score", 0), item["name"].lower()),
+            )[:linkedin_target]
 
-            for data in new_selection:
-                name = data["name"]
-                link_parts = []
-                if data.get("website_url"):
-                    link_parts.append(f"[Firma Sitesi]({data['website_url']})")
-                if data.get("linkedin_url"):
-                    link_parts.append(f"[LinkedIn]({data['linkedin_url']})")
-                findings_area.markdown(f"🌐 **{name}** | " + " | ".join(link_parts))
-                found_set.add(name)
+            web_selection = sorted(
+                web_map.values(),
+                key=lambda item: (-item.get("score", 0), item["name"].lower()),
+            )[:web_target]
 
-            selected_companies = [data["name"] for data in new_selection]
+            if web_selection:
+                findings_area.markdown("**Web Sirketleri**")
+                for data in web_selection:
+                    snippet = compact_snippet(data.get("snippet", ""), data.get("website_url", ""))
+                    findings_area.markdown(f"🌐 **{data['name']}** | [Firma Sitesi]({data['website_url']})")
+                    if snippet:
+                        findings_area.caption(snippet)
+                    st.session_state.seen_urls.add(data["website_url"])
+                    existing = selection_lookup.get(normalize_company_key(data["name"]))
+                    if not existing or (data.get("website_url") and not existing.get("website_url")):
+                        selection_lookup[normalize_company_key(data["name"])] = data
+                    found_set.add(data["name"])
+
+            if linkedin_selection:
+                findings_area.markdown("**LinkedIn Sirketleri**")
+                for data in linkedin_selection:
+                    snippet = compact_snippet(data.get("snippet", "") or data.get("title", ""), data.get("linkedin_url", ""))
+                    findings_area.markdown(f"💼 **{data['name']}** | [LinkedIn]({data['linkedin_url']})")
+                    if snippet:
+                        findings_area.caption(snippet)
+                    st.session_state.seen_urls.add(data["linkedin_url"])
+                    selection_lookup[normalize_company_key(data["name"])] = data
+                    found_set.add(data["name"])
+
+            st.caption(f"Secilen sonuclar: Web={len(web_selection)}, LinkedIn={len(linkedin_selection)}")
+
+            ordered_for_analysis = []
+            seen_company_keys = set()
+            for item in web_selection + linkedin_selection:
+                company_key = normalize_company_key(item["name"])
+                if not company_key or company_key in seen_company_keys:
+                    continue
+                seen_company_keys.add(company_key)
+                ordered_for_analysis.append(item)
+
+            selected_companies = [data["name"] for data in ordered_for_analysis]
 
         if not found_set:
             st.error("❌ Belirlenen kriterlerde yeni şirket bulunamadı.")
