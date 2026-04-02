@@ -8,6 +8,7 @@ import base64
 import time
 import shutil
 import subprocess
+import unicodedata
 import xml.etree.ElementTree as ET
 import requests
 import trafilatura
@@ -15,6 +16,14 @@ from playwright.sync_api import sync_playwright
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
+try:
+    from babel import Locale
+    from babel.languages import get_official_languages
+except Exception:
+    Locale = None
+
+    def get_official_languages(*args, **kwargs):
+        return ()
 
 # Windows üzerinde Playwright ve Asyncio çakışmasını önlemek için Proactor policy ayarı
 if sys.platform == 'win32':
@@ -27,6 +36,10 @@ PLAYWRIGHT_WAIT_UNTIL = (os.getenv("OPENCLAW_PLAYWRIGHT_WAIT_UNTIL", "networkidl
 PLAYWRIGHT_RUNTIME_FAILED = False
 OPENCLAW_LINKEDIN_BROWSER_ENABLED = os.getenv("OPENCLAW_LINKEDIN_BROWSER", "").strip() == "1"
 SEARCH_RESULT_CACHE = {}
+QUERY_TRANSLATION_CACHE = {}
+DISCOVERED_OLLAMA_MODEL = ""
+DISCOVERED_OLLAMA_BASE_URL = ""
+DISCOVERED_OLLAMA_FETCHED = False
 BRAVE_BACKOFF_UNTIL = 0.0
 BRAVE_FAILURE_COUNT = 0
 DDG_BACKOFF_UNTIL = 0.0
@@ -34,6 +47,11 @@ DDG_FAILURE_COUNT = 0
 SEARCH_HTTP_TIMEOUT = 4
 VERIFY_HTTP_TIMEOUT = 4
 LINKEDIN_HTTP_TIMEOUT = 5
+QUERY_TRANSLATION_LLM_ENABLED = os.getenv("OPENCLAW_ENABLE_QUERY_TRANSLATION", "1").strip() != "0"
+try:
+    QUERY_TRANSLATION_TIMEOUT = max(3, int(os.getenv("OPENCLAW_QUERY_TRANSLATION_TIMEOUT", "8") or "8"))
+except Exception:
+    QUERY_TRANSLATION_TIMEOUT = 8
 
 # ==========================================
 # GÜVENLİK VE FİLTRELEME (AYIRICILAR)
@@ -44,8 +62,11 @@ BLOCKED_HOST_TOKENS = [
     "trendyol.", "n11.", "alibaba.", "aliexpress.", "sahibinden.com",
     "emlakjet.com", "zingat.com", "milliyet.com.tr", "hurriyet.com.tr",
     "sozcu.com.tr", "sabah.com.tr", "cumhuriyet.com.tr", "ensonhaber.com",
-    "haber7.com", "letgo.com", "dolap.com", "zhihu.com", "quora.com",
-    "reddit.com", "tripadvisor.", "britannica.com", "crazygames.com",
+    "haber7.com", "haberler.com", "haberturk.com", "ntv.com.tr",
+    "cnnturk.com", "ekonomim.com", "dunya.com", "posta.com.tr",
+    "webtekno.com", "shiftdelete.net", "chip.com.tr", "letgo.com",
+    "dolap.com", "zhihu.com", "quora.com", "reddit.com", "tripadvisor.",
+    "britannica.com", "crazygames.com",
     "support.microsoft.com", "learn.microsoft.com"
 ] # LİNKEDİN ÇIKARILDI: LinkedIn sonuçlarının gelmesi için engeli kaldırdık.
 
@@ -57,7 +78,9 @@ BAD_SUBDOMAIN_PREFIXES = [
 BAD_PATH_TOKENS = [
     "/question/", "/questions/", "/topic/", "/wiki/", "/article/", "/articles/",
     "/support/", "/help/", "/docs/", "/doc/", "/blog/", "/news/", "/forum/",
-    "/kb/", "/tardis/", "/art/"
+    "/kb/", "/tardis/", "/art/", "/press/", "/press-release/", "/newsroom/",
+    "/announcement/", "/announcements/", "/haber/", "/haberler/", "/basin/",
+    "/duyuru/", "/media/", "/medya/"
 ]
 
 QUESTIONISH_TOKENS = [
@@ -82,7 +105,9 @@ SELLER_HINT_TOKENS = [
 ARTICLEISH_TOKENS = [
     "news", "article", "blog", "guide", "what is", "nedir", "how to", "manual",
     "datasheet", "whitepaper", "policy", "forum", "career", "careers", "jobs",
-    "job", "press release", "press", "support", "documentation", "docs", "kb"
+    "job", "press release", "press", "support", "documentation", "docs", "kb",
+    "haber", "haberler", "basin", "duyuru", "announcement", "announcements",
+    "review", "reviews", "inceleme", "yorum", "rehber", "karsilastirma"
 ]
 
 NON_COMPANY_HOST_TOKENS = [
@@ -159,6 +184,72 @@ COUNTRY_QUERY_TERM_MAP = {
     "NL": ["fabrikant", "leverancier", "bedrijf", "contact", "over ons", "locaties", "distributeur"],
     "PL": ["producent", "dostawca", "firma", "kontakt", "o nas", "lokalizacje", "dystrybutor"],
     "TR": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "kurumsal", "iletisim"],
+}
+
+LANGUAGE_QUERY_TERM_MAP = {
+    "en": ["company", "manufacturer", "supplier", "distributor", "dealer", "contact", "about", "products"],
+    "tr": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "kurumsal", "iletisim"],
+    "de": ["hersteller", "lieferant", "unternehmen", "kontakt", "standorte", "handler", "vertrieb"],
+    "fr": ["fabricant", "fournisseur", "entreprise", "contact", "distributeur", "implantations"],
+    "it": ["produttore", "fornitore", "azienda", "contatti", "distributore", "sedi"],
+    "es": ["fabricante", "proveedor", "empresa", "contacto", "distribuidor", "ubicaciones"],
+    "nl": ["fabrikant", "leverancier", "bedrijf", "contact", "distributeur", "locaties"],
+    "pl": ["producent", "dostawca", "firma", "kontakt", "dystrybutor", "lokalizacje"],
+    "pt": ["fabricante", "fornecedor", "empresa", "contato", "distribuidor", "produtos"],
+    "ru": ["производитель", "поставщик", "компания", "контакты", "дистрибьютор", "продукция"],
+    "zh": ["制造商", "供应商", "公司", "工厂", "联系", "产品"],
+    "ja": ["メーカー", "サプライヤー", "会社", "工場", "お問い合わせ", "製品"],
+    "ko": ["제조업체", "공급업체", "회사", "공장", "문의", "제품"],
+    "ar": ["شركة", "مصنع", "مورد", "اتصال", "منتجات"],
+}
+
+PRODUCT_TRANSLATION_MAP = {
+    "vana": {"en": ["valve", "industrial valve"], "de": ["ventil"], "fr": ["vanne"], "it": ["valvola"], "es": ["valvula"], "pt": ["valvula"], "pl": ["zawor"], "ru": ["klapan"], "zh": ["阀门"], "ja": ["バルブ"], "ko": ["밸브"]},
+    "pompa": {"en": ["pump", "industrial pump"], "de": ["pumpe"], "fr": ["pompe"], "it": ["pompa"], "es": ["bomba"], "pt": ["bomba"], "pl": ["pompa"], "ru": ["nasos"], "zh": ["泵"]},
+    "redüktör": {"en": ["gearbox", "speed reducer"], "de": ["getriebe"], "fr": ["reducteur"], "it": ["riduttore"], "es": ["reductor"], "pt": ["redutor"], "pl": ["przekladnia"], "ru": ["reduktor"], "zh": ["减速机"]},
+    "reductor": {"en": ["gearbox", "speed reducer"], "de": ["getriebe"], "fr": ["reducteur"], "it": ["riduttore"], "es": ["reductor"], "pt": ["redutor"], "pl": ["przekladnia"], "ru": ["reduktor"], "zh": ["减速机"]},
+    "sonsuz dişli": {"en": ["worm gear"], "de": ["schneckengetriebe"], "fr": ["engrenage a vis sans fin"], "it": ["vite senza fine"], "es": ["sinfín"], "pt": ["rosca sem fim"], "pl": ["przekladnia slimakowa"], "ru": ["chervyachnaya peredacha"], "zh": ["蜗轮蜗杆"]},
+    "rulman": {"en": ["bearing"], "de": ["lager"], "fr": ["roulement"], "it": ["cuscinetto"], "es": ["rodamiento"], "pt": ["rolamento"], "pl": ["lozysko"], "ru": ["podshipnik"], "zh": ["轴承"]},
+    "sensör": {"en": ["sensor"], "de": ["sensor"], "fr": ["capteur"], "it": ["sensore"], "es": ["sensor"], "pt": ["sensor"], "pl": ["czujnik"], "ru": ["sensor"], "zh": ["传感器"]},
+    "motor": {"en": ["motor", "electric motor"], "de": ["motor"], "fr": ["moteur"], "it": ["motore"], "es": ["motor"], "pt": ["motor"], "pl": ["silnik"], "ru": ["dvigatel"], "zh": ["电机"]},
+    "konveyör": {"en": ["conveyor", "conveyor system"], "de": ["forderband"], "fr": ["convoyeur"], "it": ["trasportatore"], "es": ["transportador"], "pt": ["transportador"], "pl": ["przenosnik"], "ru": ["konveyer"], "zh": ["输送机"]},
+    "kompresör": {"en": ["compressor"], "de": ["kompressor"], "fr": ["compresseur"], "it": ["compressore"], "es": ["compresor"], "pt": ["compressor"], "pl": ["kompresor"], "ru": ["kompressor"], "zh": ["压缩机"]},
+    "klavye": {"en": ["keyboard", "computer keyboard"], "de": ["tastatur"], "fr": ["clavier"], "it": ["tastiera"], "es": ["teclado"], "pt": ["teclado"], "pl": ["klawiatura"], "ru": ["klaviatura"], "zh": ["键盘"]},
+}
+
+SECTOR_TRANSLATION_MAP = {
+    "dokum": {"en": ["casting", "foundry"], "de": ["guss", "giesserei"], "fr": ["fonderie"], "it": ["fonderia"], "es": ["fundicion"], "pt": ["fundicao"], "pl": ["odlewnia"], "zh": ["铸造"]},
+    "makine": {"en": ["machinery", "machine"], "de": ["maschinenbau", "maschine"], "fr": ["machines"], "it": ["macchinari"], "es": ["maquinaria"], "pt": ["maquinas"], "pl": ["maszyny"], "zh": ["机械"]},
+    "sondaj": {"en": ["drilling"], "de": ["bohrung"], "fr": ["forage"], "it": ["perforazione"], "es": ["perforacion"], "pt": ["perfuracao"], "pl": ["wiercenie"], "zh": ["钻井"]},
+    "teknoloji": {"en": ["technology"], "de": ["technologie"], "fr": ["technologie"], "it": ["tecnologia"], "es": ["tecnologia"], "pt": ["tecnologia"], "pl": ["technologia"], "zh": ["科技"]},
+    "metal": {"en": ["metal"], "de": ["metall"], "fr": ["metal"], "it": ["metallo"], "es": ["metal"], "pt": ["metal"], "pl": ["metal"], "zh": ["金属"]},
+    "otomasyon": {"en": ["automation"], "de": ["automation"], "fr": ["automatisation"], "it": ["automazione"], "es": ["automatizacion"], "pt": ["automacao"], "pl": ["automatyka"], "zh": ["自动化"]},
+    "beyaz esya": {"en": ["home appliance", "white goods"], "de": ["haushaltsgerate"], "fr": ["electromenager"], "it": ["elettrodomestici"], "es": ["electrodomesticos"], "pt": ["eletrodomesticos"], "pl": ["agd"], "zh": ["家电"]},
+    "enerji": {"en": ["energy"], "de": ["energie"], "fr": ["energie"], "it": ["energia"], "es": ["energia"], "pt": ["energia"], "pl": ["energia"], "zh": ["能源"]},
+    "kimya": {"en": ["chemical", "chemicals"], "de": ["chemie"], "fr": ["chimie"], "it": ["chimica"], "es": ["quimica"], "pt": ["quimica"], "pl": ["chemia"], "zh": ["化工"]},
+    "lojistik": {"en": ["logistics"], "de": ["logistik"], "fr": ["logistique"], "it": ["logistica"], "es": ["logistica"], "pt": ["logistica"], "pl": ["logistyka"], "zh": ["物流"]},
+}
+
+TOKEN_TRANSLATION_MAP = {
+    "vana": {"en": ["valve"], "de": ["ventil"], "fr": ["vanne"], "it": ["valvola"], "es": ["valvula"], "pt": ["valvula"], "pl": ["zawor"], "ru": ["klapan"], "zh": ["阀门"], "ja": ["バルブ"], "ko": ["밸브"]},
+    "pompa": {"en": ["pump"], "de": ["pumpe"], "fr": ["pompe"], "it": ["pompa"], "es": ["bomba"], "pt": ["bomba"], "pl": ["pompa"], "ru": ["nasos"], "zh": ["泵"]},
+    "rulman": {"en": ["bearing"], "de": ["lager"], "fr": ["roulement"], "it": ["cuscinetto"], "es": ["rodamiento"], "pt": ["rolamento"], "pl": ["lozysko"], "ru": ["podshipnik"], "zh": ["轴承"]},
+    "sonsuz": {"en": ["worm"], "de": ["schnecken"], "fr": ["vis sans fin"], "it": ["vite"], "es": ["sinfin"], "pt": ["sem fim"], "pl": ["slimak"], "zh": ["蜗杆"]},
+    "disli": {"en": ["gear"], "de": ["getriebe"], "fr": ["engrenage"], "it": ["ingranaggio"], "es": ["engranaje"], "pt": ["engrenagem"], "pl": ["przekladnia"], "zh": ["齿轮"]},
+    "redüktör": {"en": ["gearbox"], "de": ["getriebe"], "fr": ["reducteur"], "it": ["riduttore"], "es": ["reductor"], "pt": ["redutor"], "pl": ["przekladnia"], "zh": ["减速机"]},
+    "reductor": {"en": ["gearbox"], "de": ["getriebe"], "fr": ["reducteur"], "it": ["riduttore"], "es": ["reductor"], "pt": ["redutor"], "pl": ["przekladnia"], "zh": ["减速机"]},
+    "motor": {"en": ["motor"], "de": ["motor"], "fr": ["moteur"], "it": ["motore"], "es": ["motor"], "pt": ["motor"], "pl": ["silnik"], "zh": ["电机"]},
+    "elektrik": {"en": ["electric"], "de": ["elektrisch"], "fr": ["electrique"], "it": ["elettrico"], "es": ["electrico"], "pt": ["eletrico"], "pl": ["elektryczny"], "zh": ["电动"]},
+    "elektrikli": {"en": ["electric"], "de": ["elektrisch"], "fr": ["electrique"], "it": ["elettrico"], "es": ["electrico"], "pt": ["eletrico"], "pl": ["elektryczny"], "zh": ["电动"]},
+    "hidrolik": {"en": ["hydraulic"], "de": ["hydraulik"], "fr": ["hydraulique"], "it": ["idraulico"], "es": ["hidraulico"], "pt": ["hidraulico"], "pl": ["hydrauliczny"], "zh": ["液压"]},
+    "pnomatik": {"en": ["pneumatic"], "de": ["pneumatik"], "fr": ["pneumatique"], "it": ["pneumatico"], "es": ["neumatico"], "pt": ["pneumatico"], "pl": ["pneumatyczny"], "zh": ["气动"]},
+    "klavye": {"en": ["keyboard"], "de": ["tastatur"], "fr": ["clavier"], "it": ["tastiera"], "es": ["teclado"], "pt": ["teclado"], "pl": ["klawiatura"], "zh": ["键盘"]},
+    "dokum": {"en": ["casting", "foundry"], "de": ["guss"], "fr": ["fonderie"], "it": ["fonderia"], "es": ["fundicion"], "pt": ["fundicao"], "pl": ["odlewnia"], "zh": ["铸造"]},
+    "makine": {"en": ["machine", "machinery"], "de": ["maschine"], "fr": ["machine"], "it": ["macchina"], "es": ["maquina"], "pt": ["maquina"], "pl": ["maszyna"], "zh": ["机械"]},
+    "sondaj": {"en": ["drilling"], "de": ["bohrung"], "fr": ["forage"], "it": ["perforazione"], "es": ["perforacion"], "pt": ["perfuracao"], "pl": ["wiercenie"], "zh": ["钻井"]},
+    "teknoloji": {"en": ["technology"], "de": ["technologie"], "fr": ["technologie"], "it": ["tecnologia"], "es": ["tecnologia"], "pt": ["tecnologia"], "pl": ["technologia"], "zh": ["科技"]},
+    "otomasyon": {"en": ["automation"], "de": ["automation"], "fr": ["automatisation"], "it": ["automazione"], "es": ["automatizacion"], "pt": ["automacao"], "pl": ["automatyka"], "zh": ["自动化"]},
+    "metal": {"en": ["metal"], "de": ["metall"], "fr": ["metal"], "it": ["metallo"], "es": ["metal"], "pt": ["metal"], "pl": ["metal"], "zh": ["金属"]},
 }
 
 COUNTRY_CALLING_CODE_MAP = {
@@ -251,6 +342,92 @@ def is_allowed_domain(url):
     return not any(token in domain for token in BLOCKED_HOST_TOKENS)
 
 
+MOJIBAKE_REPLACEMENTS = {
+    "Ã§": "ç",
+    "Ã‡": "Ç",
+    "ÄŸ": "ğ",
+    "Äž": "Ğ",
+    "Ä±": "ı",
+    "Ä°": "İ",
+    "Ã¶": "ö",
+    "Ã–": "Ö",
+    "Ã¼": "ü",
+    "Ãœ": "Ü",
+    "ÅŸ": "ş",
+    "Åž": "Ş",
+    "â€™": "'",
+    "â€œ": '"',
+    "â€": '"',
+    "â€“": "-",
+    "â€”": "-",
+    "Â": "",
+}
+
+
+def repair_text(text):
+    """Fix common mojibake patterns from search results and page titles."""
+    clean = html.unescape((text or "").replace("\xa0", " "))
+    for bad, good in MOJIBAKE_REPLACEMENTS.items():
+        clean = clean.replace(bad, good)
+    clean = clean.replace("\u200b", "")
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def fold_text(text):
+    """Normalize text for matching while preserving Turkish characters in display."""
+    clean = repair_text(text)
+    normalized = unicodedata.normalize("NFKD", clean)
+    normalized = "".join(ch for ch in normalized if not unicodedata.combining(ch))
+    return normalized.lower()
+
+
+def seed_country_maps_from_babel():
+    """Expand country lookup tables with Babel so most world countries resolve automatically."""
+    if not Locale:
+        return
+    try:
+        locale_en = Locale.parse("en")
+        locale_tr = Locale.parse("tr")
+    except Exception:
+        return
+
+    special_tlds = {"GB": ".co.uk", "US": ".com"}
+    for code, english_name in locale_en.territories.items():
+        if len(code) != 2 or not code.isalpha():
+            continue
+
+        aliases = [english_name, locale_tr.territories.get(code, ""), code.lower()]
+        for alias in aliases:
+            folded_alias = fold_text(alias)
+            if folded_alias:
+                ISO_COUNTRY_MAP.setdefault(folded_alias, code)
+
+        alias_bucket = COUNTRY_ALIAS_MAP.setdefault(code, [])
+        for alias in aliases:
+            alias = (alias or "").strip()
+            if alias and alias not in alias_bucket:
+                alias_bucket.append(alias)
+
+        cc_tld = special_tlds.get(code, f".{code.lower()}")
+        for alias in aliases[:2]:
+            folded_alias = fold_text(alias)
+            if folded_alias:
+                TLD_MAP.setdefault(folded_alias, cc_tld)
+        TLD_MAP.setdefault(code.lower(), cc_tld)
+
+        if code not in COUNTRY_QUERY_TERM_MAP:
+            terms = []
+            try:
+                for language in list(get_official_languages(code))[:2]:
+                    terms.extend(LANGUAGE_QUERY_TERM_MAP.get(language.lower(), []))
+            except Exception:
+                pass
+            COUNTRY_QUERY_TERM_MAP[code] = list(dict.fromkeys(terms or LANGUAGE_QUERY_TERM_MAP["en"]))
+
+
+seed_country_maps_from_babel()
+
+
 def build_query(*parts):
     """Boş parçaları eleyip okunabilir arama cümlesi oluşturur."""
     return " ".join(str(part).strip() for part in parts if str(part).strip())
@@ -284,7 +461,327 @@ def country_tld_for(country):
 def country_query_terms(country):
     """Country-specific company/seller terms for better foreign-language discovery."""
     code = country_code_for(country)
-    return COUNTRY_QUERY_TERM_MAP.get(code, [])
+    terms = list(COUNTRY_QUERY_TERM_MAP.get(code, []))
+    if not terms and code:
+        try:
+            for language in list(get_official_languages(code))[:2]:
+                terms.extend(LANGUAGE_QUERY_TERM_MAP.get(language.lower(), []))
+        except Exception:
+            pass
+    if "company" not in terms:
+        terms.extend(LANGUAGE_QUERY_TERM_MAP["en"][:4])
+    return list(dict.fromkeys(term for term in terms if term))
+
+
+def country_languages_for(country):
+    """Return likely official languages for the requested country."""
+    code = country_code_for(country)
+    languages = []
+    if code:
+        try:
+            languages.extend(language.lower() for language in get_official_languages(code))
+        except Exception:
+            pass
+    if code == "TR" and "tr" not in languages:
+        languages.insert(0, "tr")
+    if "en" not in languages:
+        languages.append("en")
+    return list(dict.fromkeys(lang for lang in languages if lang))
+
+
+def split_search_phrases(text, max_parts=6):
+    """Split comma/slash separated sector phrases into reusable query chunks."""
+    clean = repair_text(text)
+    if not clean:
+        return []
+    parts = [clean]
+    parts.extend(re.split(r"\s*[,;/|]+\s*", clean))
+    result = []
+    for part in parts:
+        part = re.sub(r"\s+", " ", (part or "").strip(" -|,"))
+        if len(part) < 2:
+            continue
+        if part not in result:
+            result.append(part)
+        if len(result) >= max_parts:
+            break
+    return result
+
+
+def resolve_available_ollama_runtime(preferred_model=""):
+    """Prefer a responsive local Ollama runtime and a model that really exists there."""
+    global DISCOVERED_OLLAMA_MODEL, DISCOVERED_OLLAMA_BASE_URL, DISCOVERED_OLLAMA_FETCHED
+
+    preferred = (preferred_model or os.getenv("OLLAMA_MODEL", "")).strip()
+    if DISCOVERED_OLLAMA_BASE_URL and DISCOVERED_OLLAMA_MODEL:
+        return DISCOVERED_OLLAMA_BASE_URL, DISCOVERED_OLLAMA_MODEL
+    if DISCOVERED_OLLAMA_FETCHED:
+        return DISCOVERED_OLLAMA_BASE_URL or "http://127.0.0.1:11434", DISCOVERED_OLLAMA_MODEL or preferred or "qwen2.5:3b"
+
+    local_base_url = "http://127.0.0.1:11434"
+    env_base_url = os.getenv("OLLAMA_BASE_URL", "").rstrip("/")
+    candidate_urls = []
+    for base_url in [local_base_url, env_base_url, "http://127.0.0.1:11434"]:
+        clean_url = (base_url or "").rstrip("/")
+        if clean_url and clean_url not in candidate_urls:
+            candidate_urls.append(clean_url)
+
+    discovered_models = []
+    selected_base_url = ""
+    for base_url in candidate_urls:
+        try:
+            response = HTTP_SESSION.get(f"{base_url}/api/tags", timeout=3)
+            if response.status_code != 200:
+                continue
+            payload = response.json()
+            models = [
+                (row.get("name") or row.get("model") or "").strip()
+                for row in payload.get("models", [])
+                if isinstance(row, dict)
+            ]
+            models = [name for name in models if name]
+            if not models:
+                continue
+            discovered_models = models
+            selected_base_url = base_url
+            break
+        except Exception:
+            continue
+
+    DISCOVERED_OLLAMA_FETCHED = True
+    DISCOVERED_OLLAMA_BASE_URL = selected_base_url or env_base_url or local_base_url
+    if preferred and preferred in discovered_models:
+        DISCOVERED_OLLAMA_MODEL = preferred
+    elif discovered_models:
+        DISCOVERED_OLLAMA_MODEL = discovered_models[0]
+    else:
+        DISCOVERED_OLLAMA_MODEL = preferred or "qwen2.5:3b"
+    return DISCOVERED_OLLAMA_BASE_URL, DISCOVERED_OLLAMA_MODEL
+
+
+def resolve_available_ollama_model(preferred_model=""):
+    """Return only the chosen model name for callers that do not need the base URL."""
+    return resolve_available_ollama_runtime(preferred_model)[1]
+
+
+def _parse_query_translation_terms(raw_text):
+    """Parse compact JSON/text translation responses into short search terms."""
+    raw = repair_text(raw_text)
+    if not raw:
+        return []
+
+    payload = None
+    match = re.search(r"(\{.*\}|\[.*\])", raw_text or "", re.DOTALL)
+    if match:
+        try:
+            payload = json.loads(match.group(1))
+        except Exception:
+            payload = None
+    elif raw.startswith("{") or raw.startswith("["):
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+
+    terms = []
+    if isinstance(payload, dict):
+        for key in ["terms", "translations", "keywords", "variants", "items"]:
+            value = payload.get(key)
+            if isinstance(value, list):
+                terms.extend(value)
+                break
+    elif isinstance(payload, list):
+        terms.extend(payload)
+
+    if not terms:
+        terms.extend(re.split(r"[\n,;|]+", raw))
+
+    cleaned = []
+    seen = set()
+    for term in terms:
+        if not isinstance(term, str):
+            continue
+        term = repair_text(re.sub(r"^[\-\d\.\)\s]+", "", term)).strip(" -|,.;:")
+        if len(term) < 2 or len(term) > 72:
+            continue
+        term_fold = fold_text(term)
+        if not term_fold or term_fold in seen:
+            continue
+        seen.add(term_fold)
+        cleaned.append(term)
+        if len(cleaned) >= 6:
+            break
+    return cleaned
+
+
+def llm_translate_query_terms(text, country="", context="product"):
+    """Translate arbitrary Turkish queries into short country-aware search terms."""
+    phrase = repair_text(text)
+    if not QUERY_TRANSLATION_LLM_ENABLED or not phrase:
+        return []
+
+    country_code = country_code_for(country)
+    if country_code in {"", "TR"}:
+        return []
+
+    cache_key = (context, country_code or fold_text(country), fold_text(phrase))
+    cached = QUERY_TRANSLATION_CACHE.get(cache_key)
+    if cached is not None:
+        return list(cached)
+
+    target_languages = []
+    for lang in country_languages_for(country):
+        lang = (lang or "").strip().lower()
+        if lang and lang not in target_languages:
+            target_languages.append(lang)
+        if len(target_languages) >= 2:
+            break
+    if "en" not in target_languages:
+        target_languages.append("en")
+
+    kind_label = "product" if context == "product" else "industry sector"
+    prompt = (
+        f'Turkish input: "{phrase}"\n'
+        f"Country: {repair_text(country) or country_code}\n"
+        f"Target language codes: {', '.join(target_languages)}\n"
+        f"Type: {kind_label}\n"
+        "Task: return 1 to 6 short search terms used by company websites, distributors, dealers or LinkedIn company pages.\n"
+        "Rules: translate the meaning, no sentences, no explanations, no numbering, keep terms short.\n"
+        'JSON only: {"terms":["term 1","term 2"]}'
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You translate Turkish B2B search phrases into short company-discovery keywords. Return JSON only.",
+        },
+        {"role": "user", "content": prompt},
+    ]
+
+    base_url, model = resolve_available_ollama_runtime()
+    attempts = [
+        {
+            "mode": "generate",
+            "url": f"{base_url}/api/generate",
+            "headers": {},
+            "payload": {
+                "model": model,
+                "prompt": prompt,
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 96, "num_ctx": 1536},
+            },
+        },
+        {
+            "mode": "chat",
+            "url": f"{base_url}/api/chat",
+            "headers": {},
+            "payload": {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {"temperature": 0.0, "num_predict": 96, "num_ctx": 1536},
+            },
+        },
+    ]
+
+    for attempt in attempts:
+        try:
+            response = HTTP_SESSION.post(
+                attempt["url"],
+                json=attempt["payload"],
+                headers=attempt["headers"],
+                timeout=QUERY_TRANSLATION_TIMEOUT,
+            )
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if attempt["mode"] == "generate":
+                content = data.get("response", "")
+            else:
+                content = data.get("message", {}).get("content", "")
+            terms = _parse_query_translation_terms(content)
+            if terms:
+                QUERY_TRANSLATION_CACHE[cache_key] = list(terms)
+                return list(terms)
+        except Exception:
+            continue
+
+    QUERY_TRANSLATION_CACHE[cache_key] = []
+    return []
+
+
+def translated_phrase_variants(text, country="", exact_map=None, max_parts=4, context="product"):
+    """Expand Turkish phrases with exact and token-level multilingual variants."""
+    phrases = split_search_phrases(text, max_parts=max_parts) or [repair_text(text)]
+    languages = country_languages_for(country)
+    variants = []
+
+    for phrase in phrases:
+        phrase_fold = fold_text(phrase)
+        translation_row = (exact_map or {}).get(phrase_fold, {})
+        phrase_variants = []
+        for language in languages[:3]:
+            phrase_variants.extend(translation_row.get(language, []))
+        phrase_variants.extend(translation_row.get("en", []))
+
+        tokens = search_term_tokens(phrase, min_len=2)
+        if len(tokens) <= 1:
+            pass
+        else:
+            for language in languages[:3]:
+                translated_tokens = []
+                translated_count = 0
+                for token in tokens:
+                    token_row = TOKEN_TRANSLATION_MAP.get(token, {})
+                    token_options = token_row.get(language, []) or token_row.get("en", [])
+                    if token_options:
+                        translated_tokens.append(token_options[0])
+                        translated_count += 1
+                    elif language == "en":
+                        translated_tokens.append(token)
+                if translated_count >= max(1, len(tokens) - 1) and translated_tokens:
+                    phrase_variants.append(" ".join(translated_tokens))
+
+        if country_code_for(country) not in {"", "TR"} and len([item for item in phrase_variants if item]) < 2:
+            phrase_variants.extend(llm_translate_query_terms(phrase, country=country, context=context))
+
+        variants.extend(phrase_variants)
+
+    return list(dict.fromkeys(term for term in variants if term))
+
+
+def translated_keyword_variants(keyword, country=""):
+    """Expand Turkish product input with multilingual product variants."""
+    return translated_phrase_variants(
+        keyword,
+        country=country,
+        exact_map=PRODUCT_TRANSLATION_MAP,
+        max_parts=4,
+        context="product",
+    )
+
+
+def translated_sector_variants(sector, country=""):
+    """Expand Turkish sector input with multilingual sector variants."""
+    return translated_phrase_variants(
+        sector,
+        country=country,
+        exact_map=SECTOR_TRANSLATION_MAP,
+        max_parts=5,
+        context="sector",
+    )
+
+
+def best_product_signal_score(keyword, text, country=""):
+    """Measure product match using both original and translated product terms."""
+    score = product_signal_score(keyword, text)
+    haystack = fold_text(text)
+    for variant in translated_keyword_variants(keyword, country):
+        variant_fold = fold_text(variant)
+        if not variant_fold:
+            continue
+        if variant_fold in haystack:
+            score = max(score, 24 if " " in variant_fold else 18)
+    return score
 
 
 def country_location_tokens(country):
@@ -1801,7 +2298,7 @@ def score_candidate(entry, keyword, sector, location, country):
             
     # Domain bazlı coğrafi kontrol (GLOBAL-GENEL)
     domain = entry.get('href', '').lower()
-    c_fold = country.lower().strip()
+    c_fold = fold_text(country).strip()
     is_foreign = c_fold not in ["turkiye", "turkey", "tr"] 
     
     if (".tr" in domain or ".com.tr" in domain) and "linkedin.com" not in domain:
@@ -1957,6 +2454,28 @@ def read_website_content(url):
         return content[:3000] if content else "Icerik okunamadi."
     except:
         return "Baglanti hatasi."
+
+
+def read_website_content(url):
+    """Read company-site content with OpenClaw first, then HTTP fallback."""
+    if not url:
+        return "Geçersiz link."
+    try:
+        require_host = urlparse(url).netloc.lower().replace("www.", "")
+        snapshot = openclaw_fetch_page_snapshot(url, require_host=require_host)
+        if snapshot and snapshot.get("text"):
+            snapshot_text = "\n".join(part for part in [snapshot.get("title", ""), snapshot.get("text", "")] if part)
+            return repair_text(snapshot_text)[:3000]
+
+        resp = HTTP_SESSION.get(url, timeout=8)
+        resp.raise_for_status()
+        content = trafilatura.extract(resp.text, include_comments=False, include_tables=True)
+        if not content:
+            downloaded = trafilatura.fetch_url(url)
+            content = trafilatura.extract(downloaded, include_comments=False, include_tables=True)
+        return repair_text(content)[:3000] if content else "İçerik okunamadı."
+    except Exception:
+        return "Bağlantı hatası."
 
 def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5, country=""):
     """LinkedIn üzerinden şirket arar (Playwright - Defansif Mod)."""
@@ -2157,6 +2676,37 @@ def best_company_name(*candidates):
     return best_name
 
 
+def clean_company_name(name):
+    """Extract the cleanest company-like label from noisy search titles."""
+    text = repair_text(name)
+    if not text:
+        return ""
+
+    text = re.sub(r"\b(?:site|intitle):\S+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"https?://\S+", " ", text)
+    text = text.replace("â€º", "|").replace("Â»", "|").replace("â€¢", "|").replace("Â·", "|")
+    text = re.sub(r"\b(?:www\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)+\b", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+
+    candidates = []
+    for part in re.split(r"\s*\|\s*|\s+-\s+|\s*:\s*|\s*/\s*|\s*[>Â»]\s*", text):
+        part = re.sub(r"\([^)]*\)", " ", part)
+        part = re.sub(r"\[[^\]]*\]", " ", part)
+        for token in NOISY_NAME_TOKENS:
+            part = re.sub(rf"\b{re.escape(token)}\b", " ", part, flags=re.IGNORECASE)
+        part = repair_text(part)
+        part = re.sub(r"[^\w&+.' -]+", " ", part, flags=re.UNICODE).replace("_", " ")
+        part = re.sub(r"\s+", " ", part).strip(" -|,")
+        if part:
+            candidates.append(part)
+
+    if not candidates:
+        fallback = re.sub(r"[^\w&+.' -]+", " ", text, flags=re.UNICODE).replace("_", " ")
+        return re.sub(r"\s+", " ", fallback).strip(" -|,")
+
+    return max(candidates, key=score_company_name_candidate)
+
+
 def host_brand_label(url):
     """Return the most brand-like label from a hostname."""
     host = urlparse(url or "").netloc.lower().replace("www.", "")
@@ -2333,7 +2883,7 @@ def linkedin_url_is_rejectable(url):
     )
 
 
-def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", sector="", location="", country="", li_at="", title_hint="", website_hint=""):
+def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", sector="", location="", country="", li_at="", title_hint="", website_hint="", relaxed=False):
     """Keep only LinkedIn company pages that look live and relevant to the requested product."""
     normalized_url = normalize_linkedin_company_url(linkedin_url)
     if not normalized_url or linkedin_url_is_rejectable(normalized_url):
@@ -2374,10 +2924,10 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
 
     combined_text = " ".join(part for part in combined_parts if part)
     combined_fold = fold_text(combined_text)
-    sector_fold = fold_text(sector)
+    sector_terms = [fold_text(item) for item in (split_search_phrases(sector, max_parts=5) + translated_sector_variants(sector, country))]
     city_fold = fold_text(location)
-    country_fold = fold_text(country)
-    product_score = product_signal_score(keyword, combined_text)
+    country_tokens = country_alias_tokens(country)
+    product_score = best_product_signal_score(keyword, combined_text, country=country)
 
     reasons = []
     score = 0
@@ -2403,7 +2953,7 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
     else:
         score += product_score
 
-    if sector_fold and sector_fold in combined_fold:
+    if sector_terms and any(item in combined_fold for item in sector_terms):
         score += 12
         reasons.append("industry matched")
 
@@ -2413,7 +2963,7 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
             reasons.append("city matched")
         else:
             score -= 35
-    if country_fold and country_fold in combined_fold:
+    if country_tokens and any(token in combined_fold for token in country_tokens):
         score += 8
         reasons.append("country matched")
 
@@ -2436,13 +2986,17 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
             score += 26
             reasons.append("website verified")
 
-    if company_footprint_score(combined_text) < 6 and not verified_website:
+    footprint_score = company_footprint_score(combined_text)
+    sector_hit = bool(sector_terms and any(item in combined_fold for item in sector_terms))
+
+    if footprint_score < (4 if relaxed else 6) and not verified_website:
         return None
 
     if keyword and product_score < 8 and not verified_website:
-        return None
+        if not relaxed or (product_score < 0 and not sector_hit):
+            return None
 
-    if score < 55:
+    if score < (42 if relaxed else 55):
         return None
 
     return {
@@ -2452,6 +3006,7 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
         "title": title_hint or profile.get("summary", ""),
         "score": score,
         "match_reasons": reasons,
+        "match_mode": "relaxed" if relaxed else "strict",
     }
 
 
@@ -2469,6 +3024,29 @@ def looks_like_directory_listing(title, snippet, url, page_text=""):
             return True
 
     return False
+
+
+def looks_like_article_or_info_page(title, snippet, url, page_text=""):
+    """Filter out news/info pages before they consume company-result slots."""
+    haystack = fold_text(f"{title} {snippet} {page_text} {url}")
+    host = urlparse(url or "").netloc.lower().replace("www.", "")
+    path = urlparse(url or "").path.lower()
+    article_path_tokens = [
+        "/news/", "/newsroom/", "/blog/", "/article/", "/articles/", "/press/",
+        "/press-release/", "/announcement/", "/announcements/", "/haber/",
+        "/haberler/", "/basin/", "/duyuru/", "/media/", "/medya/"
+    ]
+    if any(token in host for token in NON_COMPANY_HOST_TOKENS):
+        return True
+    if any(token in path for token in BAD_PATH_TOKENS) or any(token in path for token in article_path_tokens):
+        return True
+    if looks_like_directory_listing(title, snippet, url, page_text=page_text):
+        return True
+    if looks_like_media_or_entertainment_page(title, snippet, url, page_text=page_text):
+        return True
+    if any(token in haystack for token in ["haber", "haberler", "press release", "newsroom", "duyuru", "announcement"]):
+        return True
+    return any(token in haystack for token in ARTICLEISH_TOKENS)
 
 
 def search_term_tokens(text, min_len=3):
@@ -2514,7 +3092,9 @@ def company_footprint_score(text):
         "hakkimizda", "about us", "about company", "corporate", "kurumsal",
         "iletisim", "contact", "contact us", "urunler", "products", "services",
         "catalog", "catalogue", "solution", "cozum", "manufacturer", "supplier",
-        "ltd", "sti", "a s", "inc", "llc", "gmbh", "sanayi", "ticaret"
+        "ltd", "sti", "a s", "inc", "llc", "gmbh", "sanayi", "ticaret",
+        "atolye", "imalathane", "isletme", "workshop", "machine shop", "trading",
+        "export", "exporter", "dealer", "stockist", "store", "shop", "supplier"
     ]
     for token in footprint_tokens:
         if token in haystack:
@@ -2570,9 +3150,9 @@ def looks_like_company_result(title, snippet, url, is_li=False):
     return True
 
 
-def verify_company_homepage(candidate, keyword, sector, location="", country=""):
+def verify_company_homepage(candidate, keyword, sector, location="", country="", relaxed=False):
     """Validate a company by combining the root domain with product-page evidence."""
-    deadline = time.time() + 12
+    deadline = time.time() + (10 if relaxed else 12)
     website_url = normalize_company_site_url(candidate.get("website", ""))
     if not website_url:
         return None
@@ -2581,7 +3161,11 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
 
     session = build_http_session()
     keyword_link_tokens = search_term_tokens(keyword, min_len=4)
+    for variant in translated_keyword_variants(keyword, country):
+        keyword_link_tokens.extend(search_term_tokens(variant, min_len=2))
     sector_link_tokens = search_term_tokens(sector, min_len=4)
+    for variant in translated_sector_variants(sector, country):
+        sector_link_tokens.extend(search_term_tokens(variant, min_len=2))
     city_tokens = [fold_text(location)] if location else []
     country_tokens = country_location_tokens(country)
     target_country_code = country_code_for(country)
@@ -2759,6 +3343,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
 
     k_fold = fold_text(keyword)
     s_fold = fold_text(sector)
+    sector_terms = [fold_text(item) for item in (split_search_phrases(sector, max_parts=5) + translated_sector_variants(sector, country)) if item]
     city_fold = fold_text(location)
     country_fold = fold_text(country)
     common_company_paths = [
@@ -2818,8 +3403,8 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
             break
 
     seed_product_score = max(
-        product_signal_score(keyword, candidate.get("snippet", "")),
-        product_signal_score(
+        best_product_signal_score(keyword, candidate.get("snippet", ""), country=country),
+        best_product_signal_score(
             keyword,
             " ".join(
                 part
@@ -2831,6 +3416,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
                 ]
                 if part
             ),
+            country=country,
         ),
     )
     if keyword and seed_product_score < 8:
@@ -2860,13 +3446,14 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
             ):
                 continue
 
-            fetched_product_score = product_signal_score(
+            fetched_product_score = best_product_signal_score(
                 keyword,
                 " ".join(
                     part
                     for part in [fetched_page.get("title", ""), fetched_page.get("text", ""), fetched_page.get("url", "")]
                     if part
                 ),
+                country=country,
             )
             if fetched_product_score <= seed_product_score:
                 continue
@@ -2969,12 +3556,13 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
         f"{company_context} {extract_company_name_from_url(final_url)}"
     )
     product_score = max(
-        product_signal_score(keyword, candidate.get("snippet", "")),
-        product_signal_score(keyword, product_context),
-        product_signal_score(keyword, combined),
+        best_product_signal_score(keyword, candidate.get("snippet", ""), country=country),
+        best_product_signal_score(keyword, product_context, country=country),
+        best_product_signal_score(keyword, combined, country=country),
     )
     footprint_score = company_footprint_score(company_context)
     seller_score = seller_intent_score(company_context)
+    sector_hit = bool(sector_terms and any(item in combined_fold for item in sector_terms))
     city_hit = bool(city_fold and city_fold in location_context_fold)
     country_hit = bool(country_tokens and any(token in location_context_fold for token in country_tokens))
     location_role_hit = any(token in location_context_fold for token in LOCATION_ROLE_HINT_TOKENS)
@@ -3007,7 +3595,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
 
     if k_fold and k_fold in combined_fold and product_score < 30:
         score += 18
-    if s_fold and s_fold in combined_fold:
+    if sector_hit or (s_fold and s_fold in combined_fold):
         score += 10
     if city_hit:
         score += 20
@@ -3035,12 +3623,13 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
         score += 8
 
     if keyword and product_score < 8:
-        return None
+        if not relaxed or (product_score < 0 and not sector_hit and seller_score < 18 and footprint_score < 12):
+            return None
 
     if footprint_score < 6 and seller_score < 18 and not name_overlap:
         return None
 
-    if score < 32:
+    if score < (20 if relaxed else 32):
         return None
 
     verified = dict(candidate)
@@ -3059,6 +3648,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="")
         or root_title
         or root_text[:220]
     )
+    verified["match_mode"] = "relaxed" if relaxed else "strict"
     return verified
 
 
@@ -3136,12 +3726,18 @@ def find_company_website(company_name, keyword="", sector="", location="", count
         verified_best = verify_company_homepage(best, keyword, sector, location=location, country=country)
         if verified_best:
             return verified_best
+        relaxed_best = verify_company_homepage(best, keyword, sector, location=location, country=country, relaxed=True)
+        if relaxed_best:
+            return relaxed_best
 
     guessed = guess_company_website(clean_name, country=country)
     if guessed:
         verified_guess = verify_company_homepage(guessed, keyword, sector, location=location, country=country)
         if verified_guess:
             return verified_guess
+        relaxed_guess = verify_company_homepage(guessed, keyword, sector, location=location, country=country, relaxed=True)
+        if relaxed_guess:
+            return relaxed_guess
         if not best or guessed["score"] >= best["score"]:
             return guessed
 
@@ -3151,12 +3747,20 @@ def find_company_website(company_name, keyword="", sector="", location="", count
 def search_linkedin_company_pages_http(keyword, sector, location="", country="", limit=5, li_at=""):
     """Search for LinkedIn company pages with cleaner names and fewer noisy queries."""
     deadline = time.time() + 25
-    queries = dedupe_queries([
-        build_query("site:linkedin.com/company/", f"\"{keyword}\"", sector, location, country),
-        build_query("site:linkedin.com/company/", keyword, sector, location, country, "manufacturer"),
-        build_query("site:linkedin.com/company/", keyword, sector, location, country, "supplier"),
-        build_query("site:www.linkedin.com/company/", keyword, sector, location, country),
-    ])
+    sector_variants = split_search_phrases(sector, max_parts=4) + translated_sector_variants(sector, country)
+    if not sector_variants:
+        sector_variants = [repair_text(sector)]
+    keyword_variants = split_search_phrases(keyword, max_parts=4) + translated_keyword_variants(keyword, country)
+    queries = []
+    for kw in list(dict.fromkeys(item for item in keyword_variants if item))[:5]:
+        for sector_term in sector_variants[:3] or [""]:
+            queries.extend([
+                build_query("site:linkedin.com/company/", f"\"{kw}\"", sector_term, location, country),
+                build_query("site:linkedin.com/company/", kw, sector_term, location, country, "manufacturer"),
+                build_query("site:linkedin.com/company/", kw, sector_term, location, country, "supplier"),
+                build_query("site:www.linkedin.com/company/", kw, sector_term, location, country),
+            ])
+    queries = dedupe_queries(queries)
 
     found = {}
     for query in queries:
@@ -3187,9 +3791,9 @@ def search_linkedin_company_pages_http(keyword, sector, location="", country="",
             ) + 120
 
             haystack = fold_text(f"{title} {snippet}")
-            if keyword and fold_text(keyword) in haystack:
+            if keyword and (fold_text(keyword) in haystack or any(fold_text(item) in haystack for item in translated_keyword_variants(keyword, country))):
                 score += 10
-            if sector and fold_text(sector) in haystack:
+            if sector and any(fold_text(item) in haystack for item in sector_variants):
                 score += 6
 
             if score < 40:
@@ -3205,7 +3809,7 @@ def search_linkedin_company_pages_http(keyword, sector, location="", country="",
 
     ranked = sorted(found.values(), key=lambda item: item["score"], reverse=True)
     final_results = []
-    for row in ranked[: max(limit + 1, 4)]:
+    for row in ranked[: max(limit * 4, 12)]:
         if time.time() >= deadline:
             break
         validated = validate_linkedin_company_candidate(
@@ -3226,6 +3830,33 @@ def search_linkedin_company_pages_http(keyword, sector, location="", country="",
         if len(final_results) >= limit:
             break
 
+    if len(final_results) < limit:
+        seen_urls = {item.get("linkedin_url", "") for item in final_results}
+        for row in ranked[: max(limit * 5, 14)]:
+            if time.time() >= deadline:
+                break
+            if row.get("linkedin_url", "") in seen_urls:
+                continue
+            relaxed_match = validate_linkedin_company_candidate(
+                row["company_name"],
+                row["linkedin_url"],
+                keyword=keyword,
+                sector=sector,
+                location=location,
+                country=country,
+                li_at=li_at,
+                title_hint=row["title"],
+                website_hint="",
+                relaxed=True,
+            )
+            if not relaxed_match:
+                continue
+            relaxed_match["score"] = relaxed_match.get("score", 0) + row["score"]
+            final_results.append(relaxed_match)
+            seen_urls.add(relaxed_match.get("linkedin_url", ""))
+            if len(final_results) >= limit:
+                break
+
     return final_results
 
 
@@ -3235,20 +3866,23 @@ def score_candidate(entry, keyword, sector, location, country):
     if not haystack:
         return 0
 
-    k_fold = fold_text(keyword)
-    s_fold = fold_text(sector)
+    sector_terms = [fold_text(item) for item in (split_search_phrases(sector, max_parts=5) + translated_sector_variants(sector, country))]
     city_fold = fold_text(location)
-    country_fold = fold_text(country)
+    country_tokens = country_alias_tokens(country)
+    translated_keywords = [fold_text(item) for item in translated_keyword_variants(keyword, country)]
 
     score = 0
-    product_score = product_signal_score(keyword, haystack)
+    product_score = best_product_signal_score(keyword, haystack, country=country)
     keyword_tokens = set(search_term_tokens(keyword))
     haystack_tokens = set(search_term_tokens(haystack))
     token_overlap = len(keyword_tokens & haystack_tokens)
     score += product_score
+    if translated_keywords and any(item in haystack for item in translated_keywords):
+        score += 18
+        product_score = max(product_score, 14)
     if len(keyword_tokens) >= 2 and token_overlap >= 1:
         score += 14
-    if s_fold and s_fold in haystack:
+    if sector_terms and any(item in haystack for item in sector_terms):
         score += 6
     score += seller_intent_score(haystack)
     score += company_footprint_score(haystack)
@@ -3259,7 +3893,7 @@ def score_candidate(entry, keyword, sector, location, country):
         score += 7
 
     city_hit = bool(city_fold and city_fold in haystack)
-    country_hit = bool(country_fold and country_fold in haystack)
+    country_hit = bool(country_tokens and any(token in haystack for token in country_tokens))
     if city_hit:
         score += 42
     elif city_fold:
@@ -3287,7 +3921,7 @@ def score_candidate(entry, keyword, sector, location, country):
         score += 18
         country_hit = True
 
-    if country_fold and not country_hit:
+    if country_tokens and not country_hit:
         score -= 4
 
     if any(x in domain for x in ["/in/", "/pub/", "/people/"]):
@@ -3311,11 +3945,14 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     deadline = time.time() + 40
     target_tld = country_tld_for(country)
     q_loc = f"\"{location}\"" if location else ""
-    negations = "-news -blog -article -wiki -pdf -datasheet -manual -jobs -career -careers -film -movie -dizi -izle -fragman"
+    negations = "-news -blog -article -wiki -pdf -datasheet -manual -jobs -career -careers -film -movie -dizi -izle -fragman -haber -haberler -press -basin -duyuru -announcement -review -reviews -inceleme -yorum"
     country_fold = fold_text(country)
     product_phrase = f"\"{keyword}\"" if keyword else ""
     ascii_keyword = fold_text(keyword)
     product_tokens = search_term_tokens(keyword, min_len=4)
+    sector_variants = split_search_phrases(sector, max_parts=4) + translated_sector_variants(sector, country)
+    if not sector_variants:
+        sector_variants = [repair_text(sector)]
     token_phrase = " ".join(f"\"{token}\"" for token in product_tokens[:3]) if len(product_tokens) >= 2 else ""
     focus_tokens = dedupe_queries([
         f"\"{product_tokens[-1]}\"" if product_tokens else "",
@@ -3356,6 +3993,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
         f"\"{ascii_keyword}\"" if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
         ascii_keyword if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
         token_phrase,
+        *translated_keyword_variants(keyword, country),
         *focus_tokens,
         *turkish_focus_tokens,
         *turkish_query_variants,
@@ -3363,44 +4001,48 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
 
     if country_fold in {"turkiye", "turkey", "tr"}:
         legal_terms = ["ltd", "sti", "a.s", "sanayi", "ticaret", "kurumsal", "iletisim", "hakkimizda"]
-        seller_terms = ["firma", "sirket", "uretici", "imalatci", "tedarikci", "satici", "sanayi", "kurumsal", "urunler"]
+        seller_terms = ["firma", "sirket", "uretici", "imalatci", "tedarikci", "satici", "atolye", "isletme", "urunler"]
     else:
         legal_terms = ["inc", "llc", "gmbh", "company", "corporate", "official", "contact", "about"]
-        seller_terms = ["company", "manufacturer", "supplier", "factory", "distributor", "official", "corporate", "contact", "products"]
+        seller_terms = ["company", "manufacturer", "supplier", "workshop", "dealer", "official", "trading", "contact", "products"]
     localized_terms = country_query_terms(country)
 
     strict_queries = []
     fallback_queries = []
     for kw in keyword_variants or [product_phrase or keyword]:
-        strict_queries.extend([
-            build_query(kw, sector, q_loc, country, seller_terms[0], negations),
-            build_query(kw, sector, q_loc, country, seller_terms[1], negations),
-            build_query(kw, sector, q_loc, country, seller_terms[2], negations),
-            build_query(kw, q_loc, country, legal_terms[0], legal_terms[1], negations),
-            build_query(kw, q_loc, country, legal_terms[2], legal_terms[3], negations),
-            build_query(kw, q_loc, country, seller_terms[6], seller_terms[8], negations),
-        ])
-        fallback_queries.extend([
-            build_query(kw, sector, country, seller_terms[1], negations),
-            build_query(kw, sector, country, seller_terms[2], negations),
-            build_query(kw, country, seller_terms[0], seller_terms[6], negations),
-            build_query(kw, seller_terms[3], seller_terms[8], negations),
-            build_query(kw, legal_terms[4], legal_terms[5], negations),
-            build_query(kw, legal_terms[6], legal_terms[7], negations),
-        ])
+        for sector_term in sector_variants[:3] or [""]:
+            strict_queries.extend([
+                build_query(kw, sector_term, q_loc, country, seller_terms[0], negations),
+                build_query(kw, sector_term, q_loc, country, seller_terms[1], negations),
+                build_query(kw, sector_term, q_loc, country, seller_terms[2], negations),
+                build_query(kw, q_loc, country, legal_terms[0], legal_terms[1], negations),
+                build_query(kw, q_loc, country, legal_terms[2], legal_terms[3], negations),
+                build_query(kw, q_loc, country, seller_terms[6], seller_terms[8], negations),
+            ])
+            fallback_queries.extend([
+                build_query(kw, sector_term, country, seller_terms[1], negations),
+                build_query(kw, sector_term, country, seller_terms[2], negations),
+                build_query(kw, country, seller_terms[0], seller_terms[6], negations),
+                build_query(kw, seller_terms[3], seller_terms[8], negations),
+                build_query(kw, legal_terms[4], legal_terms[5], negations),
+                build_query(kw, legal_terms[6], legal_terms[7], negations),
+            ])
         for local_term in localized_terms[:6]:
-            strict_queries.append(build_query(kw, sector, q_loc, country, local_term, negations))
+            for sector_term in sector_variants[:2] or [""]:
+                strict_queries.append(build_query(kw, sector_term, q_loc, country, local_term, negations))
             fallback_queries.append(build_query(kw, country, local_term, negations))
         if target_tld:
-            strict_queries.extend([
-                build_query(f"site:{target_tld}", kw, q_loc, seller_terms[1], legal_terms[0]),
-                build_query(f"site:{target_tld}", kw, sector, q_loc, seller_terms[2]),
-            ])
+            for sector_term in sector_variants[:2] or [""]:
+                strict_queries.extend([
+                    build_query(f"site:{target_tld}", kw, q_loc, seller_terms[1], legal_terms[0]),
+                    build_query(f"site:{target_tld}", kw, sector_term, q_loc, seller_terms[2]),
+                ])
             fallback_queries.append(build_query(f"site:{target_tld}", kw, country, seller_terms[0]))
 
     final_results = {}
     verified_results = []
     seen_domains = set()
+    verification_attempts = set()
 
     def collect_candidates(queries, budget, query_cap):
         for query in dedupe_queries(queries)[:query_cap]:
@@ -3422,11 +4064,23 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                 if len(final_results) >= budget:
                     break
 
-    def append_verified_results():
-        for candidate in sorted(final_results.values(), key=lambda item: item["score"], reverse=True)[: max(limit * 3, 9)]:
+    def append_verified_results(relaxed=False, candidate_cap=0):
+        top_candidates = sorted(final_results.values(), key=lambda item: item["score"], reverse=True)[: candidate_cap or max(limit * 3, 9)]
+        for candidate in top_candidates:
             if time.time() >= deadline:
                 break
-            verified = verify_company_homepage(candidate, keyword, sector, location=location, country=country)
+            attempt_key = ("relaxed" if relaxed else "strict", candidate.get("website", ""))
+            if attempt_key in verification_attempts:
+                continue
+            verification_attempts.add(attempt_key)
+            verified = verify_company_homepage(
+                candidate,
+                keyword,
+                sector,
+                location=location,
+                country=country,
+                relaxed=relaxed,
+            )
             if not verified:
                 continue
             host = urlparse(verified.get("website", "")).netloc.lower()
@@ -3438,9 +4092,11 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                 break
 
     collect_candidates(strict_queries, max(limit * 5, 18), 10)
-    append_verified_results()
+    append_verified_results(relaxed=False, candidate_cap=max(limit * 3, 10))
     if len(verified_results) < limit and time.time() < deadline:
         collect_candidates(fallback_queries, max(limit * 7, 24), 8)
-        append_verified_results()
+        append_verified_results(relaxed=False, candidate_cap=max(limit * 4, 14))
+    if len(verified_results) < limit and time.time() < deadline:
+        append_verified_results(relaxed=True, candidate_cap=max(limit * 6, 20))
 
     return verified_results[:limit]
