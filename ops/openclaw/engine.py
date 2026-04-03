@@ -32,7 +32,7 @@ if sys.platform == 'win32':
 
 # Playwright varsayilan olarak acik kalir.
 # Gerekirse .env veya ortam degiskeni ile OPENCLAW_DISABLE_PLAYWRIGHT=1 yapilarak kapatilabilir.
-PLAYWRIGHT_DISABLED = os.getenv("OPENCLAW_DISABLE_PLAYWRIGHT", "").strip() == "1"
+PLAYWRIGHT_DISABLED = os.getenv("OPENCLAW_DISABLE_PLAYWRIGHT", "").strip() == "0"
 PLAYWRIGHT_WAIT_UNTIL = (os.getenv("OPENCLAW_PLAYWRIGHT_WAIT_UNTIL", "networkidle").strip() or "networkidle")
 PLAYWRIGHT_RUNTIME_FAILED = False
 PLAYWRIGHT_RUNTIME_FAILURE_DETAIL = ""
@@ -318,6 +318,7 @@ LOCATION_ROLE_HINT_TOKENS = [
 ]
 
 OPENCLAW_SITE_BROWSE_READY = None
+OPENCLAW_SITE_BROWSE_CHECKED_AT = 0.0
 
 DEFAULT_HEADERS = {
     "User-Agent": (
@@ -664,7 +665,7 @@ def llm_translate_query_terms(text, country="", context="product"):
         return []
 
     country_code = country_code_for(country)
-    if country_code in {"", "TR"}:
+    if country_code == "":
         return []
 
     cache_key = (context, country_code or fold_text(country), fold_text(phrase))
@@ -775,7 +776,7 @@ def translated_phrase_variants(text, country="", exact_map=None, max_parts=4, co
                 if translated_count >= max(1, len(tokens) - 1) and translated_tokens:
                     phrase_variants.append(" ".join(translated_tokens))
 
-        if country_code_for(country) not in {"", "TR"} and len([item for item in phrase_variants if item]) < 2:
+        if len([item for item in phrase_variants if item]) < 2:
             phrase_variants.extend(llm_translate_query_terms(phrase, country=country, context=context))
 
         variants.extend(phrase_variants)
@@ -1059,12 +1060,20 @@ def openclaw_browser_runtime(status=None):
         or profile_cfg.get("attachOnly")
         or browser_cfg.get("attachOnly")
     )
+    headless = bool(
+        status.get("headless")
+        if status.get("headless") is not None
+        else profile_cfg.get("headless")
+        if profile_cfg.get("headless") is not None
+        else browser_cfg.get("headless")
+    )
 
     return {
         "profile_name": profile_name,
         "cdp_port": cdp_port,
         "executable_path": executable_path,
         "attach_only": attach_only,
+        "headless": headless,
     }
 
 
@@ -1097,12 +1106,13 @@ def start_openclaw_attach_browser(status=None):
         executable_path,
         f"--remote-debugging-port={cdp_port}",
         f"--user-data-dir={OPENCLAW_ATTACH_PROFILE_DIR}",
-        "--headless=new",
         "--disable-gpu",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-popup-blocking",
     ]
+    if runtime.get("headless"):
+        cmd.append("--headless=new")
 
     try:
         popen_kwargs = {
@@ -1153,6 +1163,31 @@ def openclaw_browser_available():
     try:
         return run_openclaw_cli(["browser", "--json", "status"], timeout_ms=20000)
     except Exception as exc:
+        runtime = openclaw_browser_runtime({})
+        cdp_ready = openclaw_cdp_http_ready(runtime.get("cdp_port", 18800))
+        if runtime.get("attach_only") or runtime.get("executable_path") or cdp_ready:
+            print(f"OpenClaw browser status okunamadi, runtime fallback kullaniliyor: {exc}")
+            return {
+                "enabled": True,
+                "profile": runtime.get("profile_name", "openclaw"),
+                "driver": "openclaw",
+                "transport": "cdp",
+                "running": bool(cdp_ready),
+                "cdpReady": bool(cdp_ready),
+                "cdpHttp": bool(cdp_ready),
+                "pid": None,
+                "cdpPort": runtime.get("cdp_port", 18800),
+                "cdpUrl": f"http://127.0.0.1:{runtime.get('cdp_port', 18800)}",
+                "chosenBrowser": None,
+                "detectedBrowser": "custom" if runtime.get("executable_path") else None,
+                "detectedExecutablePath": runtime.get("executable_path", ""),
+                "detectError": None,
+                "userDataDir": None,
+                "headless": bool(runtime.get("headless")),
+                "noSandbox": True,
+                "executablePath": runtime.get("executable_path", ""),
+                "attachOnly": bool(runtime.get("attach_only")),
+            }
         print(f"OpenClaw browser status okunamadi: {exc}")
         return None
 
@@ -1185,7 +1220,7 @@ def ensure_openclaw_browser_started():
 
 def run_openclaw_browser_cli(args, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS, expect_json=True):
     """Browser komutlarini attach/start fallback ile güvenli sekilde calistir."""
-    global OPENCLAW_SITE_BROWSE_READY
+    global OPENCLAW_SITE_BROWSE_READY, OPENCLAW_SITE_BROWSE_CHECKED_AT
     status = ensure_openclaw_browser_started()
     if not status:
         raise RuntimeError("OpenClaw browser hazir degil")
@@ -1195,6 +1230,7 @@ def run_openclaw_browser_cli(args, timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS, expec
         message = str(exc).lower()
         if "not running" in message or "attachonly" in message or "cdp" in message:
             OPENCLAW_SITE_BROWSE_READY = None
+            OPENCLAW_SITE_BROWSE_CHECKED_AT = 0.0
             status = ensure_openclaw_browser_started()
             if status:
                 return run_openclaw_cli(args, timeout_ms=timeout_ms, expect_json=expect_json)
@@ -1351,11 +1387,14 @@ def openclaw_snapshot_from_html(page_url, html_doc, page_title="", page_text="")
 
 def openclaw_site_browse_ready():
     """Memoize whether OpenClaw site crawling is actually usable in this runtime."""
-    global OPENCLAW_SITE_BROWSE_READY
+    global OPENCLAW_SITE_BROWSE_READY, OPENCLAW_SITE_BROWSE_CHECKED_AT
     if OPENCLAW_SITE_BROWSE_READY is True:
         return OPENCLAW_SITE_BROWSE_READY
+    if OPENCLAW_SITE_BROWSE_READY is False and (time.time() - OPENCLAW_SITE_BROWSE_CHECKED_AT) < 90:
+        return False
 
     status = ensure_openclaw_browser_started()
+    OPENCLAW_SITE_BROWSE_CHECKED_AT = time.time()
     OPENCLAW_SITE_BROWSE_READY = bool(
         status and (status.get("running") or status.get("pid") or status.get("cdpReady"))
     )
@@ -1414,6 +1453,7 @@ def set_openclaw_linkedin_cookie(li_at):
     """LinkedIn oturum cerezini OpenClaw browser profiline yazar."""
     if not li_at:
         return False
+    temp_tab = None
     try:
         run_openclaw_browser_cli(
             ["browser", "--json", "cookies", "set", "li_at", li_at, "--url", "https://www.linkedin.com/"],
@@ -1421,8 +1461,28 @@ def set_openclaw_linkedin_cookie(li_at):
         )
         return True
     except Exception as exc:
+        message = str(exc or "").lower()
+        if "tab not found" in message or "target" in message:
+            try:
+                temp_tab = openclaw_browser_open("https://www.linkedin.com/feed/", timeout_ms=OPENCLAW_COMMAND_TIMEOUT_MS)
+                target_id = temp_tab.get("targetId") or temp_tab.get("id")
+                if target_id:
+                    try:
+                        openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
+                    except Exception:
+                        pass
+                run_openclaw_browser_cli(
+                    ["browser", "--json", "cookies", "set", "li_at", li_at, "--url", "https://www.linkedin.com/"],
+                    timeout_ms=30000,
+                )
+                return True
+            except Exception as retry_exc:
+                print(f"OpenClaw LinkedIn cookie retry basarisiz: {retry_exc}")
         print(f"OpenClaw LinkedIn cookie yazilamadi: {exc}")
         return False
+    finally:
+        if temp_tab:
+            openclaw_browser_close(temp_tab.get("targetId") or temp_tab.get("id"))
 
 
 def unwrap_search_result_url(url):
@@ -1649,7 +1709,8 @@ def store_candidate(final_results, title, url, snippet, keyword, sector, locatio
         if any(token in fold_text(f"{title} {snippet}") for token in COMPANY_HINT_TOKENS):
             score += 10
 
-    if score < -5:
+    min_candidate_score = 0 if len(search_term_tokens(keyword, min_len=4)) >= 2 else -5
+    if score < min_candidate_score:
         return
 
     company_name = clean_company_name(title) or extract_company_name_from_url(clean_url)
@@ -2121,21 +2182,76 @@ def fetch_linkedin_company_profile_http(company_url, li_at="", expected_name="")
     return profile
 
 
-def find_company_linkedin(company_name, website_url="", li_at=""):
-    """Firma adına göre LinkedIn şirket sayfasını tahmin edip doğrular."""
-    if not li_at:
+def find_company_linkedin(company_name, website_url="", li_at="", country=""):
+    """Firma adina gore LinkedIn sirket sayfasini slug ve dis arama ile bulmaya calisir."""
+    clean_name = clean_company_name(company_name)
+    normalized_website = normalize_company_site_url(website_url or "") or ""
+    if len(clean_name) < 2:
         return None
 
-    for slug in linkedin_slug_candidates(company_name, website_url=website_url):
-        profile = fetch_linkedin_company_profile_http(
-            f"https://www.linkedin.com/company/{slug}/",
-            li_at=li_at,
-            expected_name=company_name,
-        )
-        if profile:
-            return profile
+    if li_at:
+        for slug in linkedin_slug_candidates(clean_name, website_url=normalized_website):
+            profile = fetch_linkedin_company_profile_http(
+                f"https://www.linkedin.com/company/{slug}/",
+                li_at=li_at,
+                expected_name=clean_name,
+            )
+            if profile:
+                if normalized_website and not profile.get("website_url"):
+                    profile["website_url"] = normalized_website
+                return profile
 
-    return None
+    host_brand = host_brand_label(normalized_website)
+    queries = dedupe_queries(
+        [
+            build_query("site:linkedin.com/company/", f"\"{clean_name}\"", country),
+            build_query("site:www.linkedin.com/company/", f"\"{clean_name}\"", country),
+            build_query("site:linkedin.com/company/", clean_name, host_brand, country),
+            build_query(f"\"{clean_name}\"", "linkedin company", country),
+            build_query(f"\"{clean_name}\"", "official linkedin", country),
+        ]
+    )
+
+    best = None
+    for query in queries[:6]:
+        for entry in search_engine_results(query, country=country, allow_ddg=True):
+            linkedin_url = normalize_linkedin_company_url(entry.get("href", ""))
+            if not linkedin_url or linkedin_url_is_rejectable(linkedin_url):
+                continue
+
+            title = (entry.get("title") or "").strip()
+            snippet = (entry.get("body") or "").strip()
+            haystack = fold_text(f"{title} {snippet} {linkedin_url}")
+            score = score_company_website_match(clean_name, title or clean_name, snippet, linkedin_url)
+            if host_brand and fold_text(host_brand) in haystack:
+                score += 10
+            if normalized_website and fold_text(urlparse(normalized_website).netloc.replace("www.", "")) in haystack:
+                score += 8
+            if score < 26:
+                continue
+
+            if li_at:
+                profile = fetch_linkedin_company_profile_http(
+                    linkedin_url,
+                    li_at=li_at,
+                    expected_name=clean_name,
+                )
+                if profile:
+                    if normalized_website and not profile.get("website_url"):
+                        profile["website_url"] = normalized_website
+                    return profile
+
+            candidate = {
+                "company_name": clean_name,
+                "linkedin_url": linkedin_url,
+                "website_url": normalized_website,
+                "summary": " | ".join(part for part in [title, snippet] if part),
+                "score": score,
+            }
+            if not best or candidate["score"] > best["score"]:
+                best = candidate
+
+    return best
 
 
 def find_company_website(company_name, keyword="", sector="", location="", country=""):
@@ -2750,6 +2866,30 @@ def dedupe_queries(queries):
     return unique
 
 
+def interleave_query_groups(groups):
+    """Mix per-variant query groups so one variant cannot consume the whole budget."""
+    normalized_groups = [dedupe_queries(group) for group in groups if group]
+    if not normalized_groups:
+        return []
+
+    mixed_queries = []
+    seen = set()
+    max_group_length = max(len(group) for group in normalized_groups)
+    for idx in range(max_group_length):
+        for group in normalized_groups:
+            if idx >= len(group):
+                continue
+            query = group[idx]
+            if not query:
+                continue
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            mixed_queries.append(query)
+    return mixed_queries
+
+
 def score_company_name_candidate(name):
     """Score name chunks so search-engine crumbs lose to real company names."""
     text = re.sub(r"\s+", " ", (name or "").strip())
@@ -3131,6 +3271,15 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
         reasons.append("country matched")
 
     website_candidate = normalize_company_site_url(website_hint or profile.get("website_url", ""))
+    if not website_candidate:
+        guessed_website = find_company_website(
+            actual_name,
+            keyword=keyword,
+            sector=sector,
+            location=location,
+            country=country,
+        )
+        website_candidate = normalize_company_site_url((guessed_website or {}).get("website", ""))
     verified_website = None
     if website_candidate:
         verified_website = verify_company_homepage(
@@ -3231,6 +3380,29 @@ def search_term_tokens(text, min_len=3):
     return [token for token in tokens if token not in generic]
 
 
+def loosely_matches_token(left, right):
+    """Allow light plural/category variations such as vana -> vanalar."""
+    left = fold_text(left)
+    right = fold_text(right)
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+
+    shorter, longer = sorted([left, right], key=len)
+    return len(shorter) >= 4 and longer.startswith(shorter) and (len(longer) - len(shorter)) <= 4
+
+
+def matched_query_tokens(query_tokens, haystack_tokens):
+    """Return query tokens that have an exact or loose match in the haystack."""
+    haystack_tokens = list(haystack_tokens or [])
+    return [
+        token
+        for token in (query_tokens or [])
+        if any(loosely_matches_token(token, candidate) for candidate in haystack_tokens)
+    ]
+
+
 def product_signal_score(keyword, text):
     """Measure whether the requested product truly appears in the candidate text."""
     keyword_fold = fold_text(keyword)
@@ -3240,17 +3412,20 @@ def product_signal_score(keyword, text):
     if re.search(rf"\b{re.escape(keyword_fold)}\b", haystack):
         return 30
 
-    kw_tokens = set(search_term_tokens(keyword))
+    kw_token_list = search_term_tokens(keyword)
     hay_tokens = set(search_term_tokens(text))
-    if not kw_tokens:
+    if not kw_token_list:
         return 0
 
-    overlap = len(kw_tokens & hay_tokens)
-    if len(kw_tokens) >= 2:
+    matched_tokens = matched_query_tokens(kw_token_list, hay_tokens)
+    overlap = len(matched_tokens)
+    core_token = kw_token_list[-1] if kw_token_list else ""
+    core_hit = bool(core_token and core_token in matched_tokens)
+    if len(kw_token_list) >= 2:
         if overlap >= 2:
             return 18 + overlap * 4
         if overlap == 1:
-            return -18
+            return -6 if core_hit else -20
         return -36
 
     return 12 if overlap else -18
@@ -4076,15 +4251,20 @@ def score_candidate(entry, keyword, sector, location, country):
 
     score = 0
     product_score = best_product_signal_score(keyword, haystack, country=country)
-    keyword_tokens = set(search_term_tokens(keyword))
+    keyword_tokens = search_term_tokens(keyword)
     haystack_tokens = set(search_term_tokens(haystack))
-    token_overlap = len(keyword_tokens & haystack_tokens)
+    matched_tokens = matched_query_tokens(keyword_tokens, haystack_tokens)
+    token_overlap = len(matched_tokens)
+    core_keyword_token = keyword_tokens[-1] if keyword_tokens else ""
+    core_token_hit = bool(core_keyword_token and core_keyword_token in matched_tokens)
     score += product_score
     if translated_keywords and any(item in haystack for item in translated_keywords):
         score += 18
         product_score = max(product_score, 14)
     if len(keyword_tokens) >= 2 and token_overlap >= 1:
         score += 14
+    if len(keyword_tokens) >= 2 and token_overlap == 1 and product_score < 0:
+        score -= 18 if core_token_hit else 42
     if sector_terms and any(item in haystack for item in sector_terms):
         score += 6
     score += seller_intent_score(haystack)
@@ -4143,14 +4323,19 @@ def score_candidate(entry, keyword, sector, location, country):
     if urlparse(entry.get("href", "")).path in {"", "/"} and "linkedin.com" not in domain:
         score += 8
     if keyword and product_score < 0:
-        score -= 12 if token_overlap else 30
+        if token_overlap:
+            score -= 8 if core_token_hit else 12
+        else:
+            score -= 30
+    if len(keyword_tokens) >= 2 and token_overlap == 1 and product_score < 0:
+        score -= 10 if core_token_hit else 28
 
     return score
 
 
 def search_web_companies(keyword, sector, location="", country="", limit=6):
     """Find seller/company websites and verify them before surfacing results."""
-    deadline = time.time() + 40
+    deadline = time.time() + 75
     target_tld = country_tld_for(country)
     q_loc = f"\"{location}\"" if location else ""
     negations = "-news -blog -article -wiki -pdf -datasheet -manual -jobs -career -careers -film -movie -dizi -izle -fragman -haber -haberler -press -basin -duyuru -announcement -review -reviews -inceleme -yorum"
@@ -4158,10 +4343,26 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     product_phrase = f"\"{keyword}\"" if keyword else ""
     ascii_keyword = fold_text(keyword)
     product_tokens = search_term_tokens(keyword, min_len=4)
-    sector_variants = split_search_phrases(sector, max_parts=4) + translated_sector_variants(sector, country)
+    raw_sector_variants = split_search_phrases(sector, max_parts=4)
+    simple_sector_variants = [
+        item for item in raw_sector_variants
+        if not any(separator in item for separator in [",", ";", "/", "|"])
+    ]
+    composite_sector_variants = [
+        item for item in raw_sector_variants
+        if any(separator in item for separator in [",", ";", "/", "|"])
+    ]
+    sector_variants = dedupe_queries(
+        simple_sector_variants
+        + translated_sector_variants(sector, country)
+        + composite_sector_variants
+    )
     if not sector_variants:
         sector_variants = [repair_text(sector)]
     token_phrase = " ".join(f"\"{token}\"" for token in product_tokens[:3]) if len(product_tokens) >= 2 else ""
+    translated_product_variants = translated_keyword_variants(keyword, country)
+    translated_phrase_variants = [item for item in translated_product_variants if " " in item]
+    translated_token_variants = [item for item in translated_product_variants if " " not in item]
     focus_tokens = dedupe_queries([
         f"\"{product_tokens[-1]}\"" if product_tokens else "",
         product_tokens[-1] if product_tokens else "",
@@ -4197,12 +4398,13 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                     turkish_focus_tokens.append(f"\"{variant}\"")
     keyword_variants = dedupe_queries([
         product_phrase,
+        token_phrase,
+        *focus_tokens,
+        *translated_phrase_variants,
+        *translated_token_variants,
         keyword,
         f"\"{ascii_keyword}\"" if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
         ascii_keyword if ascii_keyword and ascii_keyword != (keyword or "").lower() else "",
-        token_phrase,
-        *translated_keyword_variants(keyword, country),
-        *focus_tokens,
         *turkish_focus_tokens,
         *turkish_query_variants,
     ])
@@ -4217,11 +4419,13 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
         small_business_terms = ["dealer", "reseller", "distributor", "stockist", "importer", "wholesaler", "trading", "shop", "products"]
     localized_terms = country_query_terms(country)
 
-    strict_queries = []
-    fallback_queries = []
+    strict_query_groups = []
+    fallback_query_groups = []
     for kw in keyword_variants or [product_phrase or keyword]:
+        strict_group = []
+        fallback_group = []
         for sector_term in sector_variants[:3] or [""]:
-            strict_queries.extend([
+            strict_group.extend([
                 build_query(kw, sector_term, q_loc, country, seller_terms[0], negations),
                 build_query(kw, sector_term, q_loc, country, seller_terms[1], negations),
                 build_query(kw, sector_term, q_loc, country, seller_terms[2], negations),
@@ -4232,7 +4436,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                 build_query(kw, q_loc, country, legal_terms[2], legal_terms[3], negations),
                 build_query(kw, q_loc, country, seller_terms[6], seller_terms[8], negations),
             ])
-            fallback_queries.extend([
+            fallback_group.extend([
                 build_query(kw, sector_term, country, seller_terms[1], negations),
                 build_query(kw, sector_term, country, seller_terms[2], negations),
                 build_query(kw, sector_term, country, small_business_terms[0], negations),
@@ -4245,20 +4449,28 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             ])
         for local_term in localized_terms[:6]:
             for sector_term in sector_variants[:2] or [""]:
-                strict_queries.append(build_query(kw, sector_term, q_loc, country, local_term, negations))
-            fallback_queries.append(build_query(kw, country, local_term, negations))
+                strict_group.append(build_query(kw, sector_term, q_loc, country, local_term, negations))
+            fallback_group.append(build_query(kw, country, local_term, negations))
         if target_tld:
             for sector_term in sector_variants[:2] or [""]:
-                strict_queries.extend([
+                strict_group.extend([
                     build_query(f"site:{target_tld}", kw, q_loc, seller_terms[1], legal_terms[0]),
                     build_query(f"site:{target_tld}", kw, sector_term, q_loc, seller_terms[2]),
                 ])
-            fallback_queries.append(build_query(f"site:{target_tld}", kw, country, seller_terms[0]))
+            fallback_group.append(build_query(f"site:{target_tld}", kw, country, seller_terms[0]))
+        strict_query_groups.append(strict_group)
+        fallback_query_groups.append(fallback_group)
+
+    strict_queries = interleave_query_groups(strict_query_groups)
+    fallback_queries = interleave_query_groups(fallback_query_groups)
 
     final_results = {}
     verified_results = []
     seen_domains = set()
     verification_attempts = set()
+    country_tokens = country_alias_tokens(country)
+    keyword_tokens = search_term_tokens(keyword)
+    core_keyword_token = keyword_tokens[-1] if keyword_tokens else ""
 
     def collect_candidates(queries, budget, query_cap):
         for query in dedupe_queries(queries)[:query_cap]:
@@ -4307,12 +4519,83 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             if len(verified_results) >= limit:
                 break
 
-    collect_candidates(strict_queries, max(limit * 6, 22), 14)
-    append_verified_results(relaxed=False, candidate_cap=max(limit * 3, 10))
+    def append_quick_fallback_results(candidate_cap=0):
+        top_candidates = sorted(
+            final_results.values(),
+            key=lambda item: item["score"],
+            reverse=True,
+        )[: candidate_cap or max(limit * 6, 24)]
+        for candidate in top_candidates:
+            if len(verified_results) >= limit:
+                break
+
+            website = normalize_company_site_url(candidate.get("website", ""))
+            if not website:
+                continue
+            host = urlparse(website).netloc.lower()
+            if host in seen_domains:
+                continue
+
+            source_url = unwrap_search_result_url(candidate.get("source_url") or "")
+            if looks_like_article_or_info_page(candidate.get("company_name", ""), candidate.get("snippet", ""), website):
+                continue
+            if source_url and looks_like_article_or_info_page(candidate.get("company_name", ""), candidate.get("snippet", ""), source_url):
+                continue
+            if looks_like_directory_listing(candidate.get("company_name", ""), candidate.get("snippet", ""), website):
+                continue
+            if looks_like_media_or_entertainment_page(candidate.get("company_name", ""), candidate.get("snippet", ""), website):
+                continue
+
+            combined = " ".join(
+                part for part in [
+                    candidate.get("company_name", ""),
+                    candidate.get("snippet", ""),
+                    website,
+                    source_url,
+                ] if part
+            )
+            combined_fold = fold_text(combined)
+            matched_tokens = matched_query_tokens(keyword_tokens, search_term_tokens(combined))
+            token_overlap = len(matched_tokens)
+            core_token_hit = bool(core_keyword_token and core_keyword_token in matched_tokens)
+            product_score = best_product_signal_score(keyword, combined, country=country)
+            sector_terms = [
+                fold_text(item)
+                for item in (split_search_phrases(sector, max_parts=5) + translated_sector_variants(sector, country))
+                if item
+            ]
+            sector_hit = bool(sector_terms and any(item in combined_fold for item in sector_terms))
+            country_hit = bool(
+                (target_tld and target_tld in website.lower())
+                or (country_tokens and any(token in combined_fold for token in country_tokens))
+            )
+
+            if candidate.get("score", 0) < 0:
+                continue
+            if not core_token_hit and product_score < 0 and token_overlap == 0:
+                continue
+            if not country_hit and country:
+                continue
+            if not core_token_hit and not sector_hit and token_overlap < 1:
+                continue
+
+            quick_score = candidate.get("score", 0) + (10 if core_token_hit else 0) + (6 if country_hit else 0)
+            quick_result = dict(candidate)
+            quick_result["website"] = website
+            quick_result["score"] = quick_score
+            quick_result["match_mode"] = "quick_fallback"
+            quick_result["snippet"] = candidate.get("snippet", "") or candidate.get("company_name", "")
+            seen_domains.add(host)
+            verified_results.append(quick_result)
+
+    collect_candidates(strict_queries, max(limit * 4, 16), 12)
+    append_verified_results(relaxed=False, candidate_cap=max(limit * 2, 8))
     if len(verified_results) < limit and time.time() < deadline:
-        collect_candidates(fallback_queries, max(limit * 8, 28), 12)
-        append_verified_results(relaxed=False, candidate_cap=max(limit * 4, 14))
+        collect_candidates(fallback_queries, max(limit * 5, 18), 10)
+        append_verified_results(relaxed=False, candidate_cap=max(limit * 3, 10))
     if len(verified_results) < limit and time.time() < deadline:
-        append_verified_results(relaxed=True, candidate_cap=max(limit * 6, 20))
+        append_verified_results(relaxed=True, candidate_cap=max(limit * 4, 14))
+    if len(verified_results) < limit:
+        append_quick_fallback_results(candidate_cap=max(limit * 6, 24))
 
     return verified_results[:limit]

@@ -13,6 +13,7 @@ from engine import (
     playwright_unavailable_reason,
     search_web_companies,
     search_linkedin_companies,
+    find_company_linkedin,
     read_website_content,
 )
 from prompts import build_analysis_base_messages, build_company_analysis_prompt, build_legacy_analysis_messages
@@ -117,6 +118,21 @@ def normalize_text(text):
 
 def keyword_tokens(text, min_len=3):
     return [token for token in re.split(r"[^a-z0-9]+", normalize_text(text)) if len(token) >= min_len]
+
+
+TURKIYE_CITY_TOKENS = [
+    "adana", "adiyaman", "afyonkarahisar", "agri", "aksaray", "amasya", "ankara", "antalya",
+    "ardahan", "artvin", "aydin", "balikesir", "bartin", "batman", "bayburt", "bilecik",
+    "bingol", "bitlis", "bolu", "burdur", "bursa", "canakkale", "cankiri", "corum",
+    "denizli", "diyarbakir", "duzce", "edirne", "elazig", "erzincan", "erzurum",
+    "eskisehir", "gaziantep", "giresun", "gumushane", "hakkari", "hatay", "igdir", "isparta",
+    "istanbul", "izmir", "kahramanmaras", "karabuk", "karaman", "kars", "kastamonu",
+    "kayseri", "kirikkale", "kirklareli", "kirsehir", "kilis", "kocaeli", "konya", "kutahya",
+    "malatya", "manisa", "mardin", "mersin", "mugla", "mus", "nevsehir", "nigde", "ordu",
+    "osmaniye", "rize", "sakarya", "samsun", "sanliurfa", "siirt", "sinop", "sirnak",
+    "sivas", "tekirdag", "tokat", "trabzon", "tunceli", "usak", "van", "yalova", "yozgat",
+    "zonguldak",
+]
 
 
 def normalize_company_key(name):
@@ -252,6 +268,37 @@ def clamp_score(value, default=0):
         return max(0, min(int(round(float(value))), 10))
     except Exception:
         return default
+
+
+def detect_conflicting_city(target_city, country, *texts):
+    """Return a detected non-target city when Turkish location evidence conflicts."""
+    target_city_norm = normalize_text(target_city)
+    country_norm = normalize_text(country)
+    if not target_city_norm or country_norm not in {"turkiye", "turkey", "tr"}:
+        return ""
+
+    haystack = normalize_text(" ".join(repair_text(text) for text in texts if text))
+    if not haystack:
+        return ""
+    if re.search(rf"\b{re.escape(target_city_norm)}\b", haystack):
+        return ""
+
+    for city in TURKIYE_CITY_TOKENS:
+        if city == target_city_norm:
+            continue
+        if re.search(rf"\b{re.escape(city)}\b", haystack):
+            return city
+    return ""
+
+
+def apply_city_mismatch_caps(final_score, location_fit=None, detected_city="", target_city=""):
+    """Cap location/final scores when evidence points to a different city."""
+    if not detected_city or normalize_text(detected_city) == normalize_text(target_city):
+        return clamp_score(final_score, 0), location_fit
+
+    adjusted_score = min(clamp_score(final_score, 0), 5)
+    adjusted_location = 4 if location_fit is None else min(clamp_score(location_fit, 0), 4)
+    return adjusted_score, adjusted_location
 
 
 def normalized_analysis_score(raw_score, product_fit=None, location_fit=None, company_validity=None, commercial_fit=None, default=0):
@@ -721,9 +768,13 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("📍 Lokasyon Filtresi")
     selected_country = st.text_input("Ülke", placeholder="Örn: Turkiye, Singapore, Germany", value="Turkiye")
-    selected_city = st.text_input("Şehir", placeholder="Örn: Istanbul, Izmir, Berlin")
+    st.caption("Sehir filtresi gecici olarak devre disi. Kesif su an ulke bazli calisiyor.")
+    selected_city = ""
 
     # Arka planda varsayılan ayarlar (UI'dan kaldırıldı)
+    effective_country = repair_text(selected_country)
+    effective_city = ""
+    effective_location_label = effective_country
     direct_mode = True 
 
     if st.button("🗑️ Önbelleği Temizle", use_container_width=True):
@@ -744,7 +795,7 @@ st.markdown("---")
 with st.expander("📖 Hızlı Başlangıç", expanded=False):
     st.markdown("""
     1. **Sektör ve ürün girin:** Sol panelden hedeflediğiniz sektör ile ürün anahtar kelimesini yazın.
-    2. **Lokasyonu belirleyin:** Ülke ve gerekiyorsa şehir filtresini ekleyin.
+    2. **Lokasyonu belirleyin:** Kesif su an ulke bazli calisir; ulke bilgisini girin.
     3. **Analizi başlatın:** Sistem web ve LinkedIn kaynaklarından firma adaylarını tarar.
     4. **Karar desteğini inceleyin:** Uygunluk skoru, firma özeti ve satış mesajı taslağını kontrol edin.
     5. **Raporu indirin:** Sonuçları sayfa sonundaki butonla CSV olarak dışa aktarın.
@@ -776,10 +827,10 @@ else:
             l_data = search_linkedin_companies(
                 product,
                 sector,
-                selected_city,
+                effective_city,
                 li_at=session_token,
                 limit=max(linkedin_target + 5, discovery_limit),
-                country=selected_country,
+                country=effective_country,
             )
             num_l = len(l_data) if isinstance(l_data, list) else 0
             linkedin_status = os.getenv("OPENCLAW_LAST_LINKEDIN_STATUS", "unknown")
@@ -789,7 +840,7 @@ else:
             )
             
             # 2. Web Aramasi
-            w_data = search_web_companies(product, sector, selected_city, selected_country, limit=max(web_target + 5, discovery_limit))
+            w_data = search_web_companies(product, sector, effective_city, effective_country, limit=max(web_target + 5, discovery_limit))
             
             status.update(label=f"✅ {num_l + len(w_data)} potansiyel şirket keşfedildi", state="complete")
             if num_l == 0:
@@ -851,6 +902,37 @@ else:
                 existing = web_map.get(match_key)
                 if not existing or candidate["score"] > existing["score"]:
                     web_map[match_key] = candidate
+
+            if len(linkedin_map) < linkedin_target and web_map:
+                enrichment_pool = sorted(
+                    web_map.values(),
+                    key=lambda item: (-item.get("score", 0), item["name"].lower()),
+                )[: max(linkedin_target + 3, 6)]
+                for web_row in enrichment_pool:
+                    if len(linkedin_map) >= linkedin_target:
+                        break
+                    match_key = normalize_company_key(web_row["name"])
+                    if not match_key or match_key in linkedin_map:
+                        continue
+                    linkedin_profile = find_company_linkedin(
+                        web_row["name"],
+                        website_url=web_row.get("website_url", ""),
+                        li_at=session_token,
+                        country=effective_country,
+                    )
+                    if not linkedin_profile or not linkedin_profile.get("linkedin_url"):
+                        continue
+                    linkedin_map[match_key] = {
+                        "source": "linkedin",
+                        "name": display_company_name(
+                            linkedin_profile.get("company_name", web_row["name"]),
+                            linkedin_profile.get("linkedin_url", ""),
+                        ),
+                        "snippet": linkedin_profile.get("summary", "") or web_row.get("snippet", ""),
+                        "score": max(web_row.get("score", 0), linkedin_profile.get("score", 0) or 0) + 25,
+                        "website_url": linkedin_profile.get("website_url", "") or web_row.get("website_url", ""),
+                        "linkedin_url": linkedin_profile.get("linkedin_url", ""),
+                    }
 
             linkedin_ranked = sorted(
                 linkedin_map.values(),
@@ -963,7 +1045,7 @@ else:
 
         legacy_messages = [
             {"role": "system", "content": "Sen kıdemli bir satış analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'summary' kısmına bu firmanın NE YAPTIĞINI anlatan tam olarak 2 CÜMLELİK bir özet yaz. 'sales_script' kısmına ise Dikkan Vana adına özgün bir teklif hazırla. Format: `{\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}`"},
-            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {selected_companies}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor?' sorusuna 2 cümlelik net bir cevap ver."}
+            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {effective_location_label}\nAdaylarımız: {selected_companies}\nNOT: Her firma için 'Bu firma tam olarak ne iş yapıyor?' sorusuna 2 cümlelik net bir cevap ver."}
         ]
 
         # 5 ADAY ANALİZİ (İstek üzerine analiz sayısını artırdık)
@@ -972,7 +1054,7 @@ else:
                 "role": "system",
                 "content": (
                     "Sen kidemli bir satis analistisin. Sirket buyuklugunu degil is uyumunu puanla. "
-                    "Skor verirken once sunu netlestir: firma istenen urunu hedef ulke/sehirde satiyor mu, dagitiyor mu, uretiyor mu, "
+                    "Skor verirken once sunu netlestir: firma istenen urunu hedef ulkede satiyor mu, dagitiyor mu, uretiyor mu, "
                     "yetkili bayi mi, reseller/distributor mu, yoksa alakasiz mi. Kucuk ve yerel firmalar da guclu eslesme ise yuksek skor alabilir. "
                     "Yalnizca JSON dondur. Format: {\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}. "
                     "summary tam olarak iki cumle olsun. Ilk cumle firmanin ne yaptigini, ikinci cumle ise hedef urun ve lokasyonla bagini anlatsin. "
@@ -984,7 +1066,7 @@ else:
                 "content": (
                     f"Urun: {repair_text(product)}\n"
                     f"Sektor: {repair_text(sector)}\n"
-                    f"Lokasyon: {repair_text(selected_city)}/{repair_text(selected_country)}\n"
+                    f"Lokasyon: {effective_location_label}\n"
                     f"Aday firmalar: {[repair_text(name) for name in selected_companies]}\n"
                     "Her firma icin urunu bu lokasyonda satar mi, dagitir mi, uretir mi veya proje bazli tedarik eder mi bunu netlestir. "
                     "Kurumsal buyukluk bir avantaj sayilmasin; is uyumu daha onemli."
@@ -995,15 +1077,15 @@ else:
         legacy_messages = build_legacy_analysis_messages(
             product=repair_text(product),
             sector=repair_text(sector),
-            city=repair_text(selected_city),
-            country=repair_text(selected_country),
+            city=effective_city,
+            country=effective_country,
             company_names=[repair_text(name) for name in selected_companies],
         )
         base_messages = build_analysis_base_messages(
             product=repair_text(product),
             sector=repair_text(sector),
-            city=repair_text(selected_city),
-            country=repair_text(selected_country),
+            city=effective_city,
+            country=effective_country,
             company_names=[repair_text(name) for name in selected_companies],
         )
 
@@ -1028,8 +1110,8 @@ else:
                                 website_text=repair_text(read_res)[:2200],
                                 product=repair_text(product),
                                 sector=repair_text(sector),
-                                city=repair_text(selected_city),
-                                country=repair_text(selected_country),
+                                city=effective_city,
+                                country=effective_country,
                             )
                             analysis_messages = base_messages + [{"role": "user", "content": prompt}]
                             ai_ana, info = call_llm_raw(analysis_messages, mode=m_str, gateway_pw=g_pw, timeout=25)
@@ -1042,8 +1124,8 @@ else:
                                 read_res,
                                 product,
                                 sector,
-                                selected_city,
-                                selected_country,
+                                effective_city,
+                                effective_country,
                             )
                             f_score = fallback["score"]
                             f_summary = company_data.get("snippet", "") or company_data.get("website_url") or company_data.get("linkedin_url") or "Firma bilgisi alınamadı."
@@ -1056,6 +1138,13 @@ else:
                             f_location_fit = None
                             f_company_validity = None
                             f_commercial_fit = None
+                            f_detected_city = detect_conflicting_city(
+                                effective_city,
+                                effective_country,
+                                read_res,
+                                company_data.get("snippet", ""),
+                                company_data.get("website_url", ""),
+                            )
                             if f_score >= 8:
                                 f_decision = "strong_match"
                             elif f_score >= 6:
@@ -1087,6 +1176,15 @@ else:
                                             ana_json.get("commercial_fit"),
                                             f_commercial_fit if f_commercial_fit is not None else 0,
                                         )
+                                        f_detected_city = detect_conflicting_city(
+                                            effective_city,
+                                            effective_country,
+                                            read_res,
+                                            company_data.get("snippet", ""),
+                                            ana_json.get("summary", ""),
+                                            ana_json.get("sales_script", ""),
+                                            company_data.get("website_url", ""),
+                                        ) or f_detected_city
                                         f_score = normalized_analysis_score(
                                             ana_json.get("final_score", ana_json.get("score")),
                                             product_fit=f_product_fit,
@@ -1108,6 +1206,13 @@ else:
                             except Exception:
                                 pass
 
+                            f_score, f_location_fit = apply_city_mismatch_caps(
+                                f_score,
+                                f_location_fit,
+                                detected_city=f_detected_city,
+                                target_city=effective_city,
+                            )
+
                             col1, col2 = st.columns([1, 4])
                             col1.metric("Uygunluk", f"{f_score}/10")
                             if len(f_summary) > 320:
@@ -1118,6 +1223,8 @@ else:
                                 detail_parts.append(f"Ürün={f_product_fit}/10")
                             if f_location_fit is not None:
                                 detail_parts.append(f"Lokasyon={f_location_fit}/10")
+                            if f_detected_city:
+                                detail_parts.append(f"Tespit Sehir={repair_text(f_detected_city).title()}")
                             if f_company_validity is not None:
                                 detail_parts.append(f"Geçerlilik={f_company_validity}/10")
                             if f_commercial_fit is not None:

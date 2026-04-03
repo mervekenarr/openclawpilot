@@ -39,7 +39,7 @@ powershell -NoProfile -Command "try { Invoke-WebRequest -UseBasicParsing -Uri 'h
 if errorlevel 1 (
     if exist "%OPENCLAW_CHROME%" (
         echo OpenClaw debug Chrome baslatiliyor...
-        start "" "%OPENCLAW_CHROME%" --remote-debugging-port=18800 --user-data-dir="%OPENCLAW_DEBUG_PROFILE%" --headless=new --disable-gpu --no-first-run --no-default-browser-check
+        start "" "%OPENCLAW_CHROME%" --remote-debugging-port=18800 --user-data-dir="%OPENCLAW_DEBUG_PROFILE%" --disable-gpu --no-first-run --no-default-browser-check
         timeout /t 3 /nobreak >nul
     ) else (
         echo [!] UYARI: Chrome bulunamadi. OpenClaw browser baglantisi eksik kalabilir.

@@ -1,0 +1,7 @@
+interface:
+  display_name: "Find Local Companies"
+  short_description: "Find real local company leads"
+  default_prompt: "Use $find-local-companies to find real supplier, distributor, manufacturer, reseller, or service-provider companies for a product in a target city and country."
+
+policy:
+  allow_implicit_invocation: true
