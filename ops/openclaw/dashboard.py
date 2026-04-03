@@ -10,10 +10,12 @@ import unicodedata
 from urllib.parse import urlparse
 from pathlib import Path
 from engine import (
+    playwright_unavailable_reason,
     search_web_companies,
     search_linkedin_companies,
     read_website_content,
 )
+from prompts import build_analysis_base_messages, build_company_analysis_prompt, build_legacy_analysis_messages
 import pandas as pd
 import io
 
@@ -200,6 +202,122 @@ def friendly_model_status(info):
     if "zira:" in low:
         return repair_text(info.replace("Zira:", "").strip())
     return repair_text(info)
+
+
+def friendly_playwright_reason(reason):
+    mapping = {
+        "env_disabled": "tarayici modu ayarlardan kapatildi",
+        "python_3_14_windows": "Windows + Python 3.14 ortaminda tarayici modu guvenli olarak devre disi",
+        "permission_denied": "tarayici alt sureci acilamadi (erisim engellendi)",
+        "subprocess_unsupported": "tarayici alt sureci bu olay dongusunda desteklenmiyor",
+        "browser_missing": "Playwright tarayici kurulumu eksik",
+        "runtime_failed": "tarayici modu bu oturumda hata verdi",
+    }
+    return mapping.get((reason or "").strip(), repair_text(reason).replace("_", " "))
+
+
+def friendly_linkedin_status(info, playwright_reason=""):
+    clean = repair_text(info or "").strip()
+    prefix, _, detail = clean.partition(":")
+    detail = detail.strip()
+
+    if prefix == "playwright":
+        count = detail or "0"
+        return f"Tarayici modundan {count} sonuc geldi."
+    if prefix == "http_fallback":
+        note = f"LinkedIn HTTP yedegi ile {detail or '0'} sonuc bulundu."
+        if playwright_reason:
+            note += f" Tarayici modu: {friendly_playwright_reason(playwright_reason)}."
+        return note
+    if prefix == "disabled":
+        return f"LinkedIn tarayici modu kullanilmadi: {friendly_playwright_reason(detail)}."
+    if prefix == "skip" and detail == "no_token":
+        return "LinkedIn oturum tokeni olmadigi icin yalnizca acik kaynak yedegi kullanildi."
+    if prefix == "error":
+        error_map = {
+            "browser_unavailable": "OpenClaw tarayici servisi kullanilamadi.",
+            "cookie_set_failed": "LinkedIn oturum bilgisi tarayiciya yazilamadi.",
+            "token_rejected": "LinkedIn oturumu kabul edilmedi.",
+            "invalid_result": "LinkedIn sonucu okunurken beklenmeyen veri alindi.",
+            "no_results": "LinkedIn tarafinda sonuc alinamadi.",
+        }
+        return error_map.get(detail, f"LinkedIn tarafinda teknik durum: {clean}")
+    if clean:
+        return f"LinkedIn durumu: {clean}"
+    return "LinkedIn durumu bilinmiyor."
+
+
+def clamp_score(value, default=0):
+    try:
+        return max(0, min(int(round(float(value))), 10))
+    except Exception:
+        return default
+
+
+def normalized_analysis_score(raw_score, product_fit=None, location_fit=None, company_validity=None, commercial_fit=None, default=0):
+    """Keep final LLM scores aligned with component evidence."""
+    component_map = {
+        "product_fit": product_fit,
+        "location_fit": location_fit,
+        "company_validity": company_validity,
+        "commercial_fit": commercial_fit,
+    }
+    components = {
+        key: clamp_score(value, None) if value is not None else None
+        for key, value in component_map.items()
+    }
+    available = {key: value for key, value in components.items() if value is not None}
+    if not available:
+        return clamp_score(raw_score, default)
+
+    weighted = round(
+        (available.get("product_fit", 0) * 0.35)
+        + (available.get("location_fit", 0) * 0.20)
+        + (available.get("company_validity", 0) * 0.25)
+        + (available.get("commercial_fit", 0) * 0.20)
+    )
+    score = clamp_score(raw_score, weighted)
+
+    if components["location_fit"] is not None and components["location_fit"] <= 3:
+        score = min(score, 6)
+    if components["company_validity"] is not None and components["company_validity"] <= 3:
+        score = min(score, 4)
+    if components["commercial_fit"] is not None and components["commercial_fit"] <= 2:
+        score = min(score, 4)
+    if components["product_fit"] is not None and components["product_fit"] <= 2:
+        score = min(score, 3)
+
+    return score
+
+
+def friendly_decision_label(value):
+    mapping = {
+        "strong_match": "Guclu eslesme",
+        "possible_match": "Olasi eslesme",
+        "weak_match": "Zayif eslesme",
+        "non_company": "Firma degil",
+        "irrelevant": "Alakasiz",
+    }
+    key = normalize_text(value).replace(" ", "_")
+    return mapping.get(key, repair_text(value))
+
+
+def friendly_company_type_label(value):
+    mapping = {
+        "manufacturer": "Uretici",
+        "distributor": "Distributor",
+        "dealer": "Bayi",
+        "supplier": "Tedarikci",
+        "rental": "Kiralama",
+        "service": "Servis",
+        "retailer": "Perakende",
+        "marketplace": "Pazaryeri",
+        "media": "Medya",
+        "directory": "Dizin",
+        "unknown": "Bilinmiyor",
+    }
+    key = normalize_text(value).replace(" ", "_")
+    return mapping.get(key, repair_text(value))
 
 
 def cleaned_sentences(text, max_sentences=2):
@@ -665,15 +783,19 @@ else:
             )
             num_l = len(l_data) if isinstance(l_data, list) else 0
             linkedin_status = os.getenv("OPENCLAW_LAST_LINKEDIN_STATUS", "unknown")
+            linkedin_status_note = friendly_linkedin_status(
+                linkedin_status,
+                playwright_reason=playwright_unavailable_reason(),
+            )
             
             # 2. Web Aramasi
             w_data = search_web_companies(product, sector, selected_city, selected_country, limit=max(web_target + 5, discovery_limit))
             
             status.update(label=f"✅ {num_l + len(w_data)} potansiyel şirket keşfedildi", state="complete")
             if num_l == 0:
-                st.info(f"LinkedIn şirket araması sonuç vermedi. Durum: {linkedin_status}")
+                st.info(f"LinkedIn şirket araması sonuç vermedi. {linkedin_status_note}")
             else:
-                st.caption(f"Kaynak dağılımı: LinkedIn={num_l}, Web={len(w_data)} | LinkedIn durumu: {linkedin_status}")
+                st.caption(f"Kaynak dağılımı: LinkedIn={num_l}, Web={len(w_data)} | {linkedin_status_note}")
             
             # Yeni bir arama başladığında eski sonuçları temizle
             st.session_state.current_results = []
@@ -846,9 +968,44 @@ else:
 
         # 5 ADAY ANALİZİ (İstek üzerine analiz sayısını artırdık)
         base_messages = [
-            {"role": "system", "content": "Sen kıdemli bir satış analistisin. Şirketleri lokasyon ve ürün uyumuna göre denetle. Yalnızca JSON döndür. Format: {\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}. summary tam olarak iki cümle olsun. sales_script ise Dikkan adına kısa, profesyonel ve kişiselleştirilmiş bir satış mesajı olsun."},
-            {"role": "user", "content": f"Ürün: {repair_text(product)}\nSektör: {repair_text(sector)}\nLokasyon: {repair_text(selected_city)}/{repair_text(selected_country)}\nAday firmalar: {[repair_text(name) for name in selected_companies]}\nHer firma için net ve ticari bir çıktı üret."},
+            {
+                "role": "system",
+                "content": (
+                    "Sen kidemli bir satis analistisin. Sirket buyuklugunu degil is uyumunu puanla. "
+                    "Skor verirken once sunu netlestir: firma istenen urunu hedef ulke/sehirde satiyor mu, dagitiyor mu, uretiyor mu, "
+                    "yetkili bayi mi, reseller/distributor mu, yoksa alakasiz mi. Kucuk ve yerel firmalar da guclu eslesme ise yuksek skor alabilir. "
+                    "Yalnizca JSON dondur. Format: {\"score\": 9, \"summary\": \"...\", \"sales_script\": \"...\"}. "
+                    "summary tam olarak iki cumle olsun. Ilk cumle firmanin ne yaptigini, ikinci cumle ise hedef urun ve lokasyonla bagini anlatsin. "
+                    "sales_script ise Dikkan adina kisa, profesyonel ve kisisellestirilmis bir satis mesaji olsun."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Urun: {repair_text(product)}\n"
+                    f"Sektor: {repair_text(sector)}\n"
+                    f"Lokasyon: {repair_text(selected_city)}/{repair_text(selected_country)}\n"
+                    f"Aday firmalar: {[repair_text(name) for name in selected_companies]}\n"
+                    "Her firma icin urunu bu lokasyonda satar mi, dagitir mi, uretir mi veya proje bazli tedarik eder mi bunu netlestir. "
+                    "Kurumsal buyukluk bir avantaj sayilmasin; is uyumu daha onemli."
+                ),
+            },
         ]
+
+        legacy_messages = build_legacy_analysis_messages(
+            product=repair_text(product),
+            sector=repair_text(sector),
+            city=repair_text(selected_city),
+            country=repair_text(selected_country),
+            company_names=[repair_text(name) for name in selected_companies],
+        )
+        base_messages = build_analysis_base_messages(
+            product=repair_text(product),
+            sector=repair_text(sector),
+            city=repair_text(selected_city),
+            country=repair_text(selected_country),
+            company_names=[repair_text(name) for name in selected_companies],
+        )
 
         for comp in selected_companies[:5]:
             with analysis_area:
@@ -863,12 +1020,16 @@ else:
                     
                         # 2. AI'ya analiz ettir
                         with st.spinner("🤖 Strateji oluşturuluyor..."):
-                            prompt = (
-                                f"Firma: {repair_text(comp)}\n"
-                                f"Website: {company_data.get('website_url', '')}\n"
-                                f"LinkedIn: {company_data.get('linkedin_url', '')}\n"
-                                f"Arama özeti: {repair_text(company_data.get('snippet', ''))}\n"
-                                f"Site içeriği:\n{repair_text(read_res)[:2200]}"
+                            prompt = build_company_analysis_prompt(
+                                company_name=repair_text(comp),
+                                website_url=company_data.get("website_url", ""),
+                                linkedin_url=company_data.get("linkedin_url", ""),
+                                search_snippet=repair_text(company_data.get("snippet", "")),
+                                website_text=repair_text(read_res)[:2200],
+                                product=repair_text(product),
+                                sector=repair_text(sector),
+                                city=repair_text(selected_city),
+                                country=repair_text(selected_country),
                             )
                             analysis_messages = base_messages + [{"role": "user", "content": prompt}]
                             ai_ana, info = call_llm_raw(analysis_messages, mode=m_str, gateway_pw=g_pw, timeout=25)
@@ -891,13 +1052,51 @@ else:
                             f_summary = fallback["summary"]
                             f_script = fallback["sales_script"]
                             source_note = f"Yerel taslak | {friendly_model_status(info)}"
+                            f_product_fit = None
+                            f_location_fit = None
+                            f_company_validity = None
+                            f_commercial_fit = None
+                            if f_score >= 8:
+                                f_decision = "strong_match"
+                            elif f_score >= 6:
+                                f_decision = "possible_match"
+                            elif f_score >= 4:
+                                f_decision = "weak_match"
+                            else:
+                                f_decision = "irrelevant"
+                            f_company_type = "unknown"
 
                             try:
                                 if ai_ana:
                                     match = re.search(r'\{.*\}', ai_ana, re.DOTALL)
                                     if match:
                                         ana_json = json.loads(match.group(0))
-                                        f_score = max(1, min(int(ana_json.get("score", f_score)), 10))
+                                        f_product_fit = clamp_score(
+                                            ana_json.get("product_fit"),
+                                            f_product_fit if f_product_fit is not None else 0,
+                                        )
+                                        f_location_fit = clamp_score(
+                                            ana_json.get("location_fit"),
+                                            f_location_fit if f_location_fit is not None else 0,
+                                        )
+                                        f_company_validity = clamp_score(
+                                            ana_json.get("company_validity"),
+                                            f_company_validity if f_company_validity is not None else 0,
+                                        )
+                                        f_commercial_fit = clamp_score(
+                                            ana_json.get("commercial_fit"),
+                                            f_commercial_fit if f_commercial_fit is not None else 0,
+                                        )
+                                        f_score = normalized_analysis_score(
+                                            ana_json.get("final_score", ana_json.get("score")),
+                                            product_fit=f_product_fit,
+                                            location_fit=f_location_fit,
+                                            company_validity=f_company_validity,
+                                            commercial_fit=f_commercial_fit,
+                                            default=f_score,
+                                        )
+                                        f_decision = repair_text(ana_json.get("decision", f_decision))
+                                        f_company_type = repair_text(ana_json.get("company_type", f_company_type))
                                         f_summary = repair_text(ana_json.get("summary", f_summary))
                                         f_script = repair_text(ana_json.get("sales_script", f_script))
                                         source_note = friendly_model_status(info)
@@ -914,6 +1113,21 @@ else:
                             if len(f_summary) > 320:
                                 f_summary = f_summary[:317].rstrip() + "..."
                             col2.markdown(f"**📄 Firma Özeti:** {repair_text(f_summary)}")
+                            detail_parts = []
+                            if f_product_fit is not None:
+                                detail_parts.append(f"Ürün={f_product_fit}/10")
+                            if f_location_fit is not None:
+                                detail_parts.append(f"Lokasyon={f_location_fit}/10")
+                            if f_company_validity is not None:
+                                detail_parts.append(f"Geçerlilik={f_company_validity}/10")
+                            if f_commercial_fit is not None:
+                                detail_parts.append(f"Ticari={f_commercial_fit}/10")
+                            if f_decision:
+                                detail_parts.append(f"Karar={friendly_decision_label(f_decision)}")
+                            if f_company_type:
+                                detail_parts.append(f"Tip={friendly_company_type_label(f_company_type)}")
+                            if detail_parts:
+                                st.caption(" | ".join(detail_parts))
 
                             st.info(f"**✉️ Özel Satış Mesajı Taslağı:**\n\n{repair_text(f_script)}")
                             st.caption(f"🤖 Kaynak bilgisi: {repair_text(source_note)}")
@@ -922,6 +1136,12 @@ else:
                         st.session_state.current_results.append({
                             "Şirket": repair_text(comp),
                             "Skor": f_score,
+                            "Karar": friendly_decision_label(f_decision),
+                            "Firma Tipi": friendly_company_type_label(f_company_type),
+                            "Urun Uyumu": f_product_fit if f_product_fit is not None else "",
+                            "Lokasyon Uyumu": f_location_fit if f_location_fit is not None else "",
+                            "Firma Gecerliligi": f_company_validity if f_company_validity is not None else "",
+                            "Ticari Uyum": f_commercial_fit if f_commercial_fit is not None else "",
                             "Özet": repair_text(f_summary),
                             "Satış Mesajı": repair_text(f_script),
                             "Kaynak": repair_text(source_note),

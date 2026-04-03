@@ -33,6 +33,7 @@ py -m streamlit run dashboard.py
 
 `setup_openclaw.py`, gerekli Python paketlerini ve Playwright Chromium kurulumunu yapar.
 Kurulum sirasinda `ops/openclaw/.env` dosyasi olusturulur veya mevcutsa korunur.
+Windows üzerinde Python 3.14 kullanılıyorsa Playwright tabanlı tarayıcı modu otomatik kapatılır ve HTTP fallback devrede kalır. Tam tarayıcı akışı için Python 3.10-3.13 önerilir.
 
 ## Proje Yapisi
 

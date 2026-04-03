@@ -16,6 +16,7 @@ from playwright.sync_api import sync_playwright
 from pathlib import Path
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 from bs4 import BeautifulSoup
+from prompts import build_query_translation_messages, build_query_translation_prompt
 try:
     from babel import Locale
     from babel.languages import get_official_languages
@@ -34,7 +35,15 @@ if sys.platform == 'win32':
 PLAYWRIGHT_DISABLED = os.getenv("OPENCLAW_DISABLE_PLAYWRIGHT", "").strip() == "1"
 PLAYWRIGHT_WAIT_UNTIL = (os.getenv("OPENCLAW_PLAYWRIGHT_WAIT_UNTIL", "networkidle").strip() or "networkidle")
 PLAYWRIGHT_RUNTIME_FAILED = False
-OPENCLAW_LINKEDIN_BROWSER_ENABLED = os.getenv("OPENCLAW_LINKEDIN_BROWSER", "").strip() == "1"
+PLAYWRIGHT_RUNTIME_FAILURE_DETAIL = ""
+PLAYWRIGHT_BLOCK_REASON = ""
+if PLAYWRIGHT_DISABLED:
+    PLAYWRIGHT_BLOCK_REASON = "env_disabled"
+elif sys.platform == "win32" and sys.version_info >= (3, 14):
+    # Python 3.14 + Windows ortaminda Playwright subprocess olustururken
+    # PermissionError verebildigi icin HTTP fallback'i tercih ediyoruz.
+    PLAYWRIGHT_BLOCK_REASON = f"python_{sys.version_info.major}_{sys.version_info.minor}_windows"
+OPENCLAW_LINKEDIN_BROWSER_ENABLED = os.getenv("OPENCLAW_LINKEDIN_BROWSER", "1").strip() != "0"
 SEARCH_RESULT_CACHE = {}
 QUERY_TRANSLATION_CACHE = {}
 DISCOVERED_OLLAMA_MODEL = ""
@@ -80,7 +89,13 @@ BAD_PATH_TOKENS = [
     "/support/", "/help/", "/docs/", "/doc/", "/blog/", "/news/", "/forum/",
     "/kb/", "/tardis/", "/art/", "/press/", "/press-release/", "/newsroom/",
     "/announcement/", "/announcements/", "/haber/", "/haberler/", "/basin/",
-    "/duyuru/", "/media/", "/medya/"
+    "/duyuru/", "/media/", "/medya/", "/magazine/", "/posts/", "/careers/", "/kariyer/"
+]
+
+BLOCKED_URL_TOKENS = [
+    "/news", "/blog", "/article", "/posts", "/press", "/media", "/magazine",
+    ".pdf", "/jobs", "/careers", "/kariyer", "linkedin.com/in/", "linkedin.com/posts/",
+    "linkedin.com/jobs/", "facebook.com", "instagram.com", "youtube.com"
 ]
 
 QUESTIONISH_TOKENS = [
@@ -92,14 +107,19 @@ COMPANY_HINT_TOKENS = [
     "company", "firma", "official", "resmi", "corporate", "kurumsal",
     "manufacturer", "supplier", "industrial", "sanayi", "uretim", "uretici",
     "factory", "solutions", "services", "products", "urun", "hakkimizda",
-    "about us", "enterprise", "group", "holding", "inc", "ltd", "llc"
+    "about us", "enterprise", "group", "holding", "inc", "ltd", "llc",
+    "trading", "workshop", "machine shop", "shop", "store", "showroom",
+    "atolye", "isletme", "magaza", "depo", "warehouse"
 ]
 
 SELLER_HINT_TOKENS = [
     "manufacturer", "supplier", "distributor", "dealer", "reseller", "wholesaler",
     "vendor", "stockist", "exporter", "integrator", "producer", "oem", "maker",
     "authorized", "dealer", "partner", "bayi", "tedarik", "tedarikci", "satici",
-    "satis", "distributoru", "distributoru", "uretim", "uretici", "imalat"
+    "satis", "distributoru", "distributoru", "uretim", "uretici", "imalat",
+    "importer", "trading", "retailer", "retail", "shop", "store", "showroom",
+    "warehouse", "stock", "servis", "magaza", "toptanci", "ithalatci",
+    "temsilci", "sube", "dealer network", "sales office"
 ]
 
 ARTICLEISH_TOKENS = [
@@ -107,7 +127,8 @@ ARTICLEISH_TOKENS = [
     "datasheet", "whitepaper", "policy", "forum", "career", "careers", "jobs",
     "job", "press release", "press", "support", "documentation", "docs", "kb",
     "haber", "haberler", "basin", "duyuru", "announcement", "announcements",
-    "review", "reviews", "inceleme", "yorum", "rehber", "karsilastirma"
+    "review", "reviews", "inceleme", "yorum", "rehber", "karsilastirma",
+    "magazine", "tender", "ihale"
 ]
 
 NON_COMPANY_HOST_TOKENS = [
@@ -122,6 +143,20 @@ DIRECTORYISH_TOKENS = [
     "b2b directory", "b2b marketplace", "marketplace", "buyers guide", "buyer guide",
     "find suppliers", "find supplier", "find manufacturers", "find manufacturer",
     "verified suppliers", "companies and suppliers", "supplier of", "suppliers of"
+]
+
+CONSUMER_RETAIL_TOKENS = [
+    "e-commerce", "ecommerce", "online shop", "online store", "consumer electronics",
+    "magaza zinciri", "shop now",
+    "buy now", "add to cart", "cart", "basket", "checkout", "sepete ekle", "sepet",
+    "same day delivery", "free shipping", "campaign", "kampanya", "discount", "indirim"
+]
+
+B2B_SIGNAL_TOKENS = [
+    "manufacturer", "supplier", "distributor", "dealer", "reseller", "wholesaler",
+    "stockist", "oem", "industrial", "b2b", "corporate", "enterprise", "kurumsal",
+    "bayi", "tedarikci", "satici", "uretici", "imalatci", "toptanci", "ithalatci",
+    "authorized dealer", "dealer network", "sales office", "proje", "project sales"
 ]
 
 COMPANY_PAGE_HINT_TOKENS = [
@@ -177,24 +212,24 @@ COUNTRY_ALIAS_MAP = {
 }
 
 COUNTRY_QUERY_TERM_MAP = {
-    "DE": ["hersteller", "lieferant", "unternehmen", "kontakt", "uber uns", "standorte", "vertriebspartner", "handler"],
-    "FR": ["fabricant", "fournisseur", "entreprise", "contact", "a propos", "implantations", "distributeur"],
-    "IT": ["produttore", "fornitore", "azienda", "contatti", "chi siamo", "sedi", "distributore"],
-    "ES": ["fabricante", "proveedor", "empresa", "contacto", "sobre nosotros", "ubicaciones", "distribuidor"],
-    "NL": ["fabrikant", "leverancier", "bedrijf", "contact", "over ons", "locaties", "distributeur"],
-    "PL": ["producent", "dostawca", "firma", "kontakt", "o nas", "lokalizacje", "dystrybutor"],
-    "TR": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "kurumsal", "iletisim"],
+    "DE": ["hersteller", "lieferant", "unternehmen", "kontakt", "uber uns", "standorte", "vertriebspartner", "handler", "distributor"],
+    "FR": ["fabricant", "fournisseur", "entreprise", "contact", "a propos", "implantations", "distributeur", "revendeur"],
+    "IT": ["produttore", "fornitore", "azienda", "contatti", "chi siamo", "sedi", "distributore", "rivenditore"],
+    "ES": ["fabricante", "proveedor", "empresa", "contacto", "sobre nosotros", "ubicaciones", "distribuidor", "revendedor"],
+    "NL": ["fabrikant", "leverancier", "bedrijf", "contact", "over ons", "locaties", "distributeur", "dealer"],
+    "PL": ["producent", "dostawca", "firma", "kontakt", "o nas", "lokalizacje", "dystrybutor", "sprzedawca"],
+    "TR": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "satici", "toptanci", "ithalatci", "kurumsal", "iletisim"],
 }
 
 LANGUAGE_QUERY_TERM_MAP = {
-    "en": ["company", "manufacturer", "supplier", "distributor", "dealer", "contact", "about", "products"],
-    "tr": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "kurumsal", "iletisim"],
-    "de": ["hersteller", "lieferant", "unternehmen", "kontakt", "standorte", "handler", "vertrieb"],
-    "fr": ["fabricant", "fournisseur", "entreprise", "contact", "distributeur", "implantations"],
-    "it": ["produttore", "fornitore", "azienda", "contatti", "distributore", "sedi"],
-    "es": ["fabricante", "proveedor", "empresa", "contacto", "distribuidor", "ubicaciones"],
-    "nl": ["fabrikant", "leverancier", "bedrijf", "contact", "distributeur", "locaties"],
-    "pl": ["producent", "dostawca", "firma", "kontakt", "dystrybutor", "lokalizacje"],
+    "en": ["company", "manufacturer", "supplier", "distributor", "dealer", "reseller", "stockist", "trading", "contact", "about", "products"],
+    "tr": ["firma", "sirket", "uretici", "imalatci", "bayi", "tedarikci", "satici", "toptanci", "ithalatci", "kurumsal", "iletisim"],
+    "de": ["hersteller", "lieferant", "unternehmen", "kontakt", "standorte", "handler", "vertrieb", "distributor"],
+    "fr": ["fabricant", "fournisseur", "entreprise", "contact", "distributeur", "implantations", "revendeur"],
+    "it": ["produttore", "fornitore", "azienda", "contatti", "distributore", "sedi", "rivenditore"],
+    "es": ["fabricante", "proveedor", "empresa", "contacto", "distribuidor", "ubicaciones", "revendedor"],
+    "nl": ["fabrikant", "leverancier", "bedrijf", "contact", "distributeur", "locaties", "dealer"],
+    "pl": ["producent", "dostawca", "firma", "kontakt", "dystrybutor", "lokalizacje", "sprzedawca"],
     "pt": ["fabricante", "fornecedor", "empresa", "contato", "distribuidor", "produtos"],
     "ru": ["производитель", "поставщик", "компания", "контакты", "дистрибьютор", "продукция"],
     "zh": ["制造商", "供应商", "公司", "工厂", "联系", "产品"],
@@ -339,7 +374,15 @@ def company_token_set(name):
 def is_allowed_domain(url):
     """Çöp siteleri ve sosyal medyayı eler."""
     domain = url.lower()
-    return not any(token in domain for token in BLOCKED_HOST_TOKENS)
+    return not any(token in domain for token in BLOCKED_HOST_TOKENS) and not any(
+        token in domain for token in BLOCKED_URL_TOKENS
+    )
+
+
+def url_hits_blocklist(url):
+    """Reject URLs that are structurally unlikely to be company targets."""
+    lowered = (url or "").lower()
+    return any(token in lowered for token in BLOCKED_URL_TOKENS)
 
 
 MOJIBAKE_REPLACEMENTS = {
@@ -609,7 +652,7 @@ def _parse_query_translation_terms(raw_text):
             continue
         seen.add(term_fold)
         cleaned.append(term)
-        if len(cleaned) >= 6:
+        if len(cleaned) >= 10:
             break
     return cleaned
 
@@ -640,22 +683,13 @@ def llm_translate_query_terms(text, country="", context="product"):
         target_languages.append("en")
 
     kind_label = "product" if context == "product" else "industry sector"
-    prompt = (
-        f'Turkish input: "{phrase}"\n'
-        f"Country: {repair_text(country) or country_code}\n"
-        f"Target language codes: {', '.join(target_languages)}\n"
-        f"Type: {kind_label}\n"
-        "Task: return 1 to 6 short search terms used by company websites, distributors, dealers or LinkedIn company pages.\n"
-        "Rules: translate the meaning, no sentences, no explanations, no numbering, keep terms short.\n"
-        'JSON only: {"terms":["term 1","term 2"]}'
+    prompt = build_query_translation_prompt(
+        phrase=phrase,
+        country_label=repair_text(country) or country_code,
+        target_languages=target_languages,
+        kind_label=kind_label,
     )
-    messages = [
-        {
-            "role": "system",
-            "content": "You translate Turkish B2B search phrases into short company-discovery keywords. Return JSON only.",
-        },
-        {"role": "user", "content": prompt},
-    ]
+    messages = build_query_translation_messages(prompt)
 
     base_url, model = resolve_available_ollama_runtime()
     attempts = [
@@ -876,16 +910,44 @@ def linkedin_status_label(prefix, detail=""):
     return f"{prefix}:{detail}" if detail else prefix
 
 
+def classify_playwright_failure(exc):
+    """Playwright hatalarini kisa durum kodlarina indirger."""
+    text = str(exc or "").lower()
+    if (
+        isinstance(exc, PermissionError)
+        or "winerror 5" in text
+        or "access is denied" in text
+        or "erisim engellendi" in text
+    ):
+        return "permission_denied"
+    if "notimplementederror" in text or ("subprocess" in text and "not supported" in text):
+        return "subprocess_unsupported"
+    if "executable doesn't exist" in text or "browser_type.launch" in text:
+        return "browser_missing"
+    name = getattr(exc, "__class__", type(exc)).__name__.lower()
+    return name or "runtime_failed"
+
+
+def playwright_unavailable_reason():
+    """Playwright neden kullanilamiyor bilgisini dondurur."""
+    if PLAYWRIGHT_BLOCK_REASON:
+        return PLAYWRIGHT_BLOCK_REASON
+    if PLAYWRIGHT_RUNTIME_FAILED:
+        return PLAYWRIGHT_RUNTIME_FAILURE_DETAIL or "runtime_failed"
+    return ""
+
+
 def can_use_playwright():
     """Bu oturumda Playwright kullanılabilir mi?"""
-    return not PLAYWRIGHT_DISABLED and not PLAYWRIGHT_RUNTIME_FAILED
+    return not playwright_unavailable_reason()
 
 
 def mark_playwright_failed(exc):
     """Playwright bir kez patlarsa oturum için kapat."""
-    global PLAYWRIGHT_RUNTIME_FAILED
+    global PLAYWRIGHT_RUNTIME_FAILED, PLAYWRIGHT_RUNTIME_FAILURE_DETAIL
     PLAYWRIGHT_RUNTIME_FAILED = True
-    print(f"Playwright runtime kapatildi: {exc}")
+    PLAYWRIGHT_RUNTIME_FAILURE_DETAIL = classify_playwright_failure(exc)
+    print(f"Playwright runtime kapatildi [{PLAYWRIGHT_RUNTIME_FAILURE_DETAIL}]: {exc}")
 
 
 def goto_with_fallback(page, url, timeout=40000):
@@ -1188,16 +1250,22 @@ def openclaw_browser_evaluate(target_id, fn, timeout_ms=30000):
     return result.get("result", result)
 
 
+def is_openclaw_timeout_error(exc):
+    """Detect browser/gateway timeout errors returned by OpenClaw."""
+    message = str(exc or "").lower()
+    return "gateway timeout" in message or "timed out" in message or "timeout" in message
+
+
 def openclaw_browser_capture_page(target_id, timeout_ms=20000):
     """Basit bir HTML/text snapshot alir; parser'ı zorlayan JS kullanmaz."""
-    snapshot_js = """function () {
-        return {
-            url: location.href,
-            title: document.title || '',
-            html: document.documentElement ? document.documentElement.outerHTML : '',
-            text: document.body && document.body.innerText ? document.body.innerText : ''
-        };
-    }"""
+    snapshot_js = (
+        "function(){return {"
+        "url: location.href, "
+        "title: document.title || '', "
+        "html: document.documentElement ? document.documentElement.outerHTML : '', "
+        "text: document.body && document.body.innerText ? document.body.innerText : ''"
+        "};}"
+    )
     result = openclaw_browser_evaluate(target_id, snapshot_js, timeout_ms=timeout_ms)
     if isinstance(result, dict):
         return result
@@ -1206,6 +1274,78 @@ def openclaw_browser_capture_page(target_id, timeout_ms=20000):
         "title": "",
         "html": str(result or ""),
         "text": "",
+    }
+
+
+def openclaw_snapshot_from_html(page_url, html_doc, page_title="", page_text=""):
+    """Build a richer snapshot in Python to avoid fragile browser-side evaluate JS."""
+    final_page_url = (page_url or "").strip()
+    html_doc = html_doc or ""
+    if not html_doc:
+        return None
+
+    soup = BeautifulSoup(html_doc, "html.parser")
+
+    def clean(value):
+        return " ".join((value or "").split())
+
+    title = clean(page_title) or clean(soup.title.get_text(" ", strip=True) if soup.title else "")
+    extracted_text = page_text or trafilatura.extract(
+        html_doc,
+        include_comments=False,
+        include_tables=False,
+    ) or soup.get_text(" ", strip=True)
+    extracted_text = clean(extracted_text)[:4200]
+
+    links = []
+    seen_links = set()
+    for anchor in soup.select("a[href]"):
+        href = (anchor.get("href") or "").strip()
+        if not href:
+            continue
+        absolute_url = urljoin(final_page_url, href)
+        if absolute_url in seen_links or not re.match(r"^https?://", absolute_url, re.I):
+            continue
+        seen_links.add(absolute_url)
+        links.append(
+            {
+                "url": absolute_url,
+                "text": clean(
+                    anchor.get_text(" ", strip=True)
+                    or anchor.get("aria-label", "")
+                    or anchor.get("title", "")
+                ),
+            }
+        )
+        if len(links) >= 160:
+            break
+
+    location_parts = []
+    location_parts.extend(
+        clean(node.get_text(" ", strip=True))
+        for node in soup.select(
+            "address, footer, [class*='contact'], [class*='location'], [class*='office'], "
+            "[class*='branch'], [class*='dealer'], [class*='distributor'], [id*='contact'], "
+            "[id*='location'], [id*='office'], [id*='branch'], [itemprop='address'], "
+            "[itemprop='addressCountry']"
+        )[:16]
+    )
+    location_parts.extend(
+        clean(f"{node.get('name') or node.get('property') or ''} {node.get('content') or ''}")
+        for node in soup.select("meta[name], meta[property]")[:40]
+    )
+    location_parts.extend(
+        clean(node.get_text(" ", strip=True))
+        for node in soup.select("script[type='application/ld+json']")[:8]
+    )
+
+    return {
+        "url": final_page_url,
+        "title": title,
+        "text": extracted_text,
+        "lang": clean(soup.html.get("lang", "") if soup.html else ""),
+        "locationText": clean(" ".join(part for part in location_parts if part))[:2200],
+        "links": links,
     }
 
 
@@ -1234,44 +1374,24 @@ def openclaw_fetch_page_snapshot(url, require_host=""):
         if not target_id:
             return None
 
-        openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
-        openclaw_browser_wait(target_id=target_id, time_ms=1800, timeout_ms=4000)
+        try:
+            openclaw_browser_wait(target_id=target_id, load="domcontentloaded", timeout_ms=15000)
+        except Exception as exc:
+            if not is_openclaw_timeout_error(exc):
+                raise
 
-        snapshot_js = r"""() => {
-            const clean = (value) => (value || '').replace(/\s+/g, ' ').trim();
-            const toAbs = (href) => {
-                try {
-                    return new URL(href, location.href).href;
-                } catch (err) {
-                    return '';
-                }
-            };
-            const links = Array.from(document.querySelectorAll('a[href]')).map((anchor) => ({
-                url: toAbs(anchor.getAttribute('href') || anchor.href || ''),
-                text: clean(anchor.textContent || anchor.getAttribute('aria-label') || anchor.title || ''),
-            })).filter((row) => row.url && /^https?:/i.test(row.url)).slice(0, 160);
-            const locationBlocks = Array.from(document.querySelectorAll(
-                'address, footer, [class*="contact"], [class*="location"], [class*="office"], [class*="branch"], [class*="dealer"], [class*="distributor"], [id*="contact"], [id*="location"], [id*="office"], [id*="branch"], [itemprop="address"], [itemprop="addressCountry"]'
-            )).map((node) => clean(node.innerText)).filter(Boolean).slice(0, 12);
-            const meta = Array.from(document.querySelectorAll('meta[name], meta[property]'))
-                .map((node) => clean(`${node.getAttribute('name') || node.getAttribute('property') || ''} ${node.getAttribute('content') || ''}`))
-                .filter(Boolean)
-                .slice(0, 60);
-            const jsonld = Array.from(document.querySelectorAll('script[type="application/ld+json"]'))
-                .map((node) => clean(node.textContent || ''))
-                .filter(Boolean)
-                .slice(0, 10);
-            return {
-                url: location.href,
-                title: clean(document.title),
-                text: clean(document.body?.innerText || '').slice(0, 4200),
-                lang: clean(document.documentElement?.lang || ''),
-                locationText: clean([...locationBlocks, ...meta, ...jsonld].join(' ')).slice(0, 2200),
-                links,
-            };
-        }"""
+        try:
+            openclaw_browser_wait(target_id=target_id, time_ms=1800, timeout_ms=4000)
+        except Exception:
+            pass
 
-        snapshot = openclaw_browser_evaluate(target_id, snapshot_js, timeout_ms=25000) or {}
+        page_state = openclaw_browser_capture_page(target_id, timeout_ms=20000) or {}
+        snapshot = openclaw_snapshot_from_html(
+            page_state.get("url", "") or url,
+            page_state.get("html", ""),
+            page_title=page_state.get("title", ""),
+            page_text=page_state.get("text", ""),
+        ) or {}
         final_url = snapshot.get("url", "") or url
         final_host = urlparse(final_url).netloc.lower().replace("www.", "")
         if require_host and final_host != require_host:
@@ -1279,7 +1399,11 @@ def openclaw_fetch_page_snapshot(url, require_host=""):
         if not snapshot.get("title") and not snapshot.get("text"):
             return None
         return snapshot
-    except Exception:
+    except Exception as exc:
+        if is_openclaw_timeout_error(exc):
+            print(f"OpenClaw snapshot timeout [{url}], HTTP fallback kullaniliyor.")
+        else:
+            print(f"OpenClaw snapshot alma hatasi [{url}]: {exc}")
         return None
     finally:
         if opened:
@@ -1407,6 +1531,28 @@ def seller_intent_score(text):
     if looks_like_article_or_info_page("", haystack, haystack):
         score -= 40
     return score
+
+
+def consumer_retail_penalty(text):
+    """Penalize consumer-retail pages unless they also show strong B2B evidence."""
+    haystack = fold_text(text)
+    if not haystack:
+        return 0
+
+    retail_hit = any(token in haystack for token in CONSUMER_RETAIL_TOKENS)
+    b2b_hit = any(token in haystack for token in B2B_SIGNAL_TOKENS)
+    if not retail_hit:
+        return 0
+
+    penalty = -6 if b2b_hit else -22
+    if any(
+        token in haystack
+        for token in ["add to cart", "cart", "basket", "checkout", "sepete ekle", "sepet", "free shipping", "same day delivery"]
+    ):
+        penalty -= 14 if not b2b_hit else 4
+    if any(token in haystack for token in ["marketplace", "pazar yeri", "shopping"]):
+        penalty -= 16 if not b2b_hit else 6
+    return penalty
 
 
 def verify_company_homepage(candidate, keyword, sector, location="", country=""):
@@ -2401,7 +2547,7 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             mark_playwright_failed(e)
             print(f"Playwright Arama Hatası, HTTP fallback devreye giriyor: {str(e)}")
     else:
-        print("Playwright kapali: OPENCLAW_DISABLE_PLAYWRIGHT=1, HTTP fallback kullaniliyor.")
+        print(f"Playwright kapali: {playwright_unavailable_reason() or 'disabled'}, HTTP fallback kullaniliyor.")
 
     if len(final_results) < limit:
         for q in web_queries:
@@ -2502,6 +2648,11 @@ def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5,
         return fallback_results
 
     results = []
+    if not can_use_playwright() and not fallback_results:
+        os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label(
+            "disabled",
+            playwright_unavailable_reason() or "playwright_unavailable",
+        )
     if can_use_playwright():
         try:
             with sync_playwright() as p:
@@ -2563,9 +2714,16 @@ def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5,
                 browser.close()
         except Exception as e:
             mark_playwright_failed(e)
+            os.environ["OPENCLAW_LAST_LINKEDIN_STATUS"] = linkedin_status_label(
+                "disabled",
+                playwright_unavailable_reason(),
+            )
             print(f"LinkedIn Hata, HTTP fallback devreye giriyor: {str(e)}")
     else:
-        print("LinkedIn Playwright kapali: OPENCLAW_DISABLE_PLAYWRIGHT=1, HTTP fallback kullaniliyor.")
+        print(
+            f"LinkedIn Playwright kapali: {playwright_unavailable_reason() or 'disabled'}, "
+            "HTTP fallback kullaniliyor."
+        )
 
     final_results = results if results else fallback_results
     if results:
@@ -2928,6 +3086,8 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
     city_fold = fold_text(location)
     country_tokens = country_alias_tokens(country)
     product_score = best_product_signal_score(keyword, combined_text, country=country)
+    seller_score = seller_intent_score(combined_text)
+    country_hit = bool(country_tokens and any(token in combined_fold for token in country_tokens))
 
     reasons = []
     score = 0
@@ -2956,14 +3116,17 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
     if sector_terms and any(item in combined_fold for item in sector_terms):
         score += 12
         reasons.append("industry matched")
+    if seller_score >= 18:
+        score += min(18, seller_score // 2)
+        reasons.append("seller intent")
+    elif any(
+        token in combined_fold
+        for token in ["trading", "workshop", "shop", "store", "showroom", "atolye", "isletme", "magaza"]
+    ):
+        score += 8
+        reasons.append("local seller signal")
 
-    if city_fold:
-        if city_fold in combined_fold:
-            score += 18
-            reasons.append("city matched")
-        else:
-            score -= 35
-    if country_tokens and any(token in combined_fold for token in country_tokens):
+    if country_hit:
         score += 8
         reasons.append("country matched")
 
@@ -2986,17 +3149,26 @@ def validate_linkedin_company_candidate(company_name, linkedin_url, keyword="", 
             score += 26
             reasons.append("website verified")
 
+    if city_fold:
+        if city_fold in combined_fold:
+            score += 18
+            reasons.append("city matched")
+        elif verified_website or country_hit:
+            score -= 8
+        else:
+            score -= 18
+
     footprint_score = company_footprint_score(combined_text)
     sector_hit = bool(sector_terms and any(item in combined_fold for item in sector_terms))
 
-    if footprint_score < (4 if relaxed else 6) and not verified_website:
+    if footprint_score < (4 if relaxed else 6) and seller_score < (18 if relaxed else 22) and not verified_website:
         return None
 
     if keyword and product_score < 8 and not verified_website:
-        if not relaxed or (product_score < 0 and not sector_hit):
+        if not relaxed or (product_score < 0 and not sector_hit and seller_score < 18 and not country_hit):
             return None
 
-    if score < (42 if relaxed else 55):
+    if score < (38 if relaxed else 48):
         return None
 
     return {
@@ -3094,7 +3266,9 @@ def company_footprint_score(text):
         "catalog", "catalogue", "solution", "cozum", "manufacturer", "supplier",
         "ltd", "sti", "a s", "inc", "llc", "gmbh", "sanayi", "ticaret",
         "atolye", "imalathane", "isletme", "workshop", "machine shop", "trading",
-        "export", "exporter", "dealer", "stockist", "store", "shop", "supplier"
+        "export", "exporter", "dealer", "stockist", "store", "shop", "supplier",
+        "reseller", "wholesaler", "importer", "warehouse", "showroom", "depo",
+        "magaza", "toptanci", "ithalatci", "temsilci", "servis", "sube"
     ]
     for token in footprint_tokens:
         if token in haystack:
@@ -3118,6 +3292,8 @@ def looks_like_article_or_info_page(title, snippet, url):
     haystack = fold_text(f"{title} {snippet} {url}")
     host = urlparse(url or "").netloc.lower().replace("www.", "")
     path = urlparse(url or "").path.lower()
+    if url_hits_blocklist(url):
+        return True
     if any(token in host for token in NON_COMPANY_HOST_TOKENS):
         return True
     if any(token in path for token in BAD_PATH_TOKENS):
@@ -3136,6 +3312,8 @@ def looks_like_company_result(title, snippet, url, is_li=False):
     host = parsed.netloc.lower().replace("www.", "")
     path = parsed.path.lower()
 
+    if url_hits_blocklist(url):
+        return False
     if not is_li and any(token in path for token in BAD_PATH_TOKENS):
         return False
     if any(host.startswith(f"{prefix}.") for prefix in BAD_SUBDOMAIN_PREFIXES):
@@ -3562,6 +3740,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="",
     )
     footprint_score = company_footprint_score(company_context)
     seller_score = seller_intent_score(company_context)
+    retail_penalty = consumer_retail_penalty(company_context)
     sector_hit = bool(sector_terms and any(item in combined_fold for item in sector_terms))
     city_hit = bool(city_fold and city_fold in location_context_fold)
     country_hit = bool(country_tokens and any(token in location_context_fold for token in country_tokens))
@@ -3591,7 +3770,7 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="",
         )
         conflicting_city = other_city_hits[0] if other_city_hits else ""
 
-    score = seller_score + footprint_score + product_score
+    score = seller_score + footprint_score + product_score + retail_penalty
 
     if k_fold and k_fold in combined_fold and product_score < 30:
         score += 18
@@ -3627,6 +3806,8 @@ def verify_company_homepage(candidate, keyword, sector, location="", country="",
             return None
 
     if footprint_score < 6 and seller_score < 18 and not name_overlap:
+        return None
+    if retail_penalty <= -50 and seller_score < 18 and not sector_hit and not name_overlap:
         return None
 
     if score < (20 if relaxed else 32):
@@ -3746,20 +3927,42 @@ def find_company_website(company_name, keyword="", sector="", location="", count
 
 def search_linkedin_company_pages_http(keyword, sector, location="", country="", limit=5, li_at=""):
     """Search for LinkedIn company pages with cleaner names and fewer noisy queries."""
-    deadline = time.time() + 25
+    deadline = time.time() + 28
     sector_variants = split_search_phrases(sector, max_parts=4) + translated_sector_variants(sector, country)
     if not sector_variants:
         sector_variants = [repair_text(sector)]
     keyword_variants = split_search_phrases(keyword, max_parts=4) + translated_keyword_variants(keyword, country)
+    quoted_location = f"\"{location}\"" if location else ""
+    localized_terms = country_query_terms(country)
+    linkedin_seller_terms = dedupe_queries([
+        "supplier",
+        "distributor",
+        "dealer",
+        "reseller",
+        "stockist",
+        "wholesaler",
+        "trading",
+        *localized_terms[:4],
+    ])
     queries = []
     for kw in list(dict.fromkeys(item for item in keyword_variants if item))[:5]:
         for sector_term in sector_variants[:3] or [""]:
             queries.extend([
-                build_query("site:linkedin.com/company/", f"\"{kw}\"", sector_term, location, country),
-                build_query("site:linkedin.com/company/", kw, sector_term, location, country, "manufacturer"),
-                build_query("site:linkedin.com/company/", kw, sector_term, location, country, "supplier"),
-                build_query("site:www.linkedin.com/company/", kw, sector_term, location, country),
+                build_query("site:linkedin.com/company/", f"\"{kw}\"", sector_term, quoted_location, country),
+                build_query("site:linkedin.com/company/", kw, sector_term, quoted_location, country, "manufacturer"),
+                build_query("site:linkedin.com/company/", kw, sector_term, quoted_location, country, "supplier"),
+                build_query("site:linkedin.com/company/", kw, sector_term, quoted_location, country, "distributor"),
+                build_query("site:linkedin.com/company/", kw, sector_term, quoted_location, country, "dealer"),
+                build_query("site:linkedin.com/company/", kw, sector_term, quoted_location, country, "reseller"),
+                build_query("site:www.linkedin.com/company/", kw, sector_term, quoted_location, country),
             ])
+            for seller_term in linkedin_seller_terms[:6]:
+                queries.append(build_query("site:linkedin.com/company/", kw, sector_term, country, seller_term))
+        queries.extend([
+            build_query("site:linkedin.com/company/", kw, quoted_location, country, "products"),
+            build_query("site:linkedin.com/company/", kw, quoted_location, country, "contact"),
+            build_query("site:linkedin.com/company/", kw, quoted_location, country, "trading"),
+        ])
     queries = dedupe_queries(queries)
 
     found = {}
@@ -3803,7 +4006,7 @@ def search_linkedin_company_pages_http(keyword, sector, location="", country="",
                 found[url] = {
                     "company_name": name,
                     "linkedin_url": url,
-                    "title": snippet,
+                    "title": " | ".join(part for part in [title, snippet] if part),
                     "score": score,
                 }
 
@@ -3886,11 +4089,16 @@ def score_candidate(entry, keyword, sector, location, country):
         score += 6
     score += seller_intent_score(haystack)
     score += company_footprint_score(haystack)
+    score += consumer_retail_penalty(haystack)
 
     if any(token in haystack for token in INDUSTRY_TOKENS):
         score += 3
     if any(token in haystack for token in ["manufacturer", "uretim", "uretici", "sanayi", "industrial", "fabrik"]):
         score += 7
+    if any(token in haystack for token in ["dealer", "reseller", "stockist", "wholesaler", "trading", "shop", "store", "bayi", "satici", "toptanci", "ithalatci", "atolye", "isletme"]):
+        score += 12
+    if any(token in haystack for token in ["warehouse", "depo", "showroom", "sube", "servis", "temsilci"]):
+        score += 6
 
     city_hit = bool(city_fold and city_fold in haystack)
     country_hit = bool(country_tokens and any(token in haystack for token in country_tokens))
@@ -4002,9 +4210,11 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     if country_fold in {"turkiye", "turkey", "tr"}:
         legal_terms = ["ltd", "sti", "a.s", "sanayi", "ticaret", "kurumsal", "iletisim", "hakkimizda"]
         seller_terms = ["firma", "sirket", "uretici", "imalatci", "tedarikci", "satici", "atolye", "isletme", "urunler"]
+        small_business_terms = ["bayi", "satici", "toptanci", "ithalatci", "temsilcilik", "isletme", "depo", "magaza", "urunler"]
     else:
         legal_terms = ["inc", "llc", "gmbh", "company", "corporate", "official", "contact", "about"]
         seller_terms = ["company", "manufacturer", "supplier", "workshop", "dealer", "official", "trading", "contact", "products"]
+        small_business_terms = ["dealer", "reseller", "distributor", "stockist", "importer", "wholesaler", "trading", "shop", "products"]
     localized_terms = country_query_terms(country)
 
     strict_queries = []
@@ -4015,6 +4225,9 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
                 build_query(kw, sector_term, q_loc, country, seller_terms[0], negations),
                 build_query(kw, sector_term, q_loc, country, seller_terms[1], negations),
                 build_query(kw, sector_term, q_loc, country, seller_terms[2], negations),
+                build_query(kw, sector_term, q_loc, country, small_business_terms[0], negations),
+                build_query(kw, sector_term, q_loc, country, small_business_terms[1], negations),
+                build_query(kw, q_loc, country, small_business_terms[2], small_business_terms[6], negations),
                 build_query(kw, q_loc, country, legal_terms[0], legal_terms[1], negations),
                 build_query(kw, q_loc, country, legal_terms[2], legal_terms[3], negations),
                 build_query(kw, q_loc, country, seller_terms[6], seller_terms[8], negations),
@@ -4022,8 +4235,11 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             fallback_queries.extend([
                 build_query(kw, sector_term, country, seller_terms[1], negations),
                 build_query(kw, sector_term, country, seller_terms[2], negations),
+                build_query(kw, sector_term, country, small_business_terms[0], negations),
+                build_query(kw, sector_term, country, small_business_terms[3], negations),
                 build_query(kw, country, seller_terms[0], seller_terms[6], negations),
                 build_query(kw, seller_terms[3], seller_terms[8], negations),
+                build_query(kw, small_business_terms[4], small_business_terms[8], negations),
                 build_query(kw, legal_terms[4], legal_terms[5], negations),
                 build_query(kw, legal_terms[6], legal_terms[7], negations),
             ])
@@ -4091,10 +4307,10 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             if len(verified_results) >= limit:
                 break
 
-    collect_candidates(strict_queries, max(limit * 5, 18), 10)
+    collect_candidates(strict_queries, max(limit * 6, 22), 14)
     append_verified_results(relaxed=False, candidate_cap=max(limit * 3, 10))
     if len(verified_results) < limit and time.time() < deadline:
-        collect_candidates(fallback_queries, max(limit * 7, 24), 8)
+        collect_candidates(fallback_queries, max(limit * 8, 28), 12)
         append_verified_results(relaxed=False, candidate_cap=max(limit * 4, 14))
     if len(verified_results) < limit and time.time() < deadline:
         append_verified_results(relaxed=True, candidate_cap=max(limit * 6, 20))
