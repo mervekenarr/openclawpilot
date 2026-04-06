@@ -218,12 +218,12 @@ def call_llm_raw(messages, mode="direct", gateway_pw="", timeout=20):
             "model": settings.get("OLLAMA_MODEL", "qwen2.5:14b"),
             "messages": messages,
             "stream": False,
-            "options": {"num_ctx": 4096, "temperature": 0.1, "num_predict": 512}
+            "options": {"num_ctx": 4096, "temperature": 0.2, "num_predict": 1500}
         }
     else:
         url = "http://127.0.0.1:18789/v1/chat/completions"
         headers = {"Authorization": f"Bearer {gateway_pw}"}
-        payload = {"model": f"ollama/{settings.get('OLLAMA_MODEL', 'qwen2.5:14b')}", "messages": messages, "stream": False}
+        payload = {"model": f"ollama/{settings.get('OLLAMA_MODEL', 'qwen2.5:14b')}", "messages": messages, "stream": False, "temperature": 0.2, "max_tokens": 1500}
 
     try:
         start_t = time.time()

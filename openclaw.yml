@@ -1,0 +1,17 @@
+models:
+  providers:
+    ollama:
+      baseUrl: "http://172.16.44.8:11434"
+      apiKey: "ollama-local"
+      api: "ollama"
+      models:
+        - id: "qwen2.5:14b"
+          name: "Qwen 2.5 14B"
+
+gateway:
+  mode: "local"
+  bind: "0.0.0.0"
+  pairing: false
+  auth:
+    mode: "token"
+    token: "demo-openclaw-token"

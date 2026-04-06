@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  openclaw-sales-assistant:
+    build: .
+    container_name: openclaw_sales_bot
+    ports:
+      - "8501:8501"
+    environment:
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - LINKEDIN_SESSION_TOKEN=${LINKEDIN_SESSION_TOKEN}
+    volumes:
+      - .:/app
+    restart: unless-stopped
