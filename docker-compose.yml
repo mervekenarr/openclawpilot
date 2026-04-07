@@ -1,6 +1,53 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16
+    container_name: n8n_db
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n_automation
+    restart: always
+    ports:
+      - "5678:5678"
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  openclaw-gateway:
+    image: ghcr.io/openclaw/openclaw:latest
+    container_name: openclaw_brain
+    ports:
+      - "18789:18789"
+    volumes:
+      - ./openclaw.yml:/app/openclaw.yml
+      - ./ops/openclaw/runtime-home:/app/runtime-home
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
   openclaw-sales-assistant:
     build: .
     container_name: openclaw_sales_bot
@@ -9,6 +56,17 @@ services:
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - LINKEDIN_SESSION_TOKEN=${LINKEDIN_SESSION_TOKEN}
+      - OPENCLAW_GATEWAY_URL=http://openclaw-gateway:18789
+      - N8N_WEBHOOK_URL=http://n8n:5678/webhook/leads
     volumes:
       - .:/app
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
+    depends_on:
+      - openclaw-gateway
+      - n8n
+
+volumes:
+  postgres_data:
+  n8n_data:

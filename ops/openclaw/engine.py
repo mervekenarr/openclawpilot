@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import urllib.parse
 import sys
 import asyncio
 import requests
@@ -38,27 +39,33 @@ def score_candidate(entry, keyword, sector, location, country):
     # Sektör/Ürün
     if keyword.lower() in text: score += 30
     
-    # Haber/Blog cezası (Engellemek yerine ağır puan kır)
-    news_tokens = ["haber", "blog", "nedir", "nasil", "rehber", "forum", "gazete", "haberleri", "magazine"]
-    if any(n in text for n in news_tokens): score -= 300
+    # Haber/Blog cezası (Daha esnek, -300 yerine -50 ve bazılarında tolerans)
+    news_tokens = ["haber", "nedir", "nasil", "rehber", "forum", "gazete", "haberleri", "magazine"]
+    if any(n in text for n in news_tokens): score -= 50
     if "linkedin.com/company/" in entry.get('href', '').lower(): score += 200
         
     return score
 
 def get_fallback_results(query):
-    """Tarayıcı bloklandığında Requests ile DuckDuckGo üzerinden sonuç çeker."""
+    """Tarayıcı bloklandığında Yahoo Search üzerinden sonuç çeker."""
     results = []
     try:
-        url = f"https://duckduckgo.com/html/?q={query}"
+        url = f"https://search.yahoo.com/search?p={query}"
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0"}
         resp = requests.get(url, headers=headers, timeout=10)
-        # DDG Lite Parse
-        links = re.findall(r'class="result-link" href="([^"]+)"', resp.text)
-        titles = re.findall(r'class="result-link"[^>]*>([^<]+)</a>', resp.text)
-        for i in range(min(len(links), len(titles))):
-            results.append({"title": titles[i], "href": links[i], "body": ""})
-    except Exception as e:
-        print(f"Fallback Hatası: {e}")
+        
+        # Yahoo Search HTML Parsing
+        links = re.findall(r'href="(https?://[^"]+)"', resp.text)
+        links = [l for l in links if 'yahoo.com' not in l and 'microsoft.com' not in l]
+        
+        # Sadece benzersiz URL'leri al, Yahoo bazen çöp parametreler koyabiliyor
+        seen = set()
+        for link in links:
+            if link not in seen:
+                seen.add(link)
+                results.append({"title": link.split("/")[-1] or link, "href": link, "body": ""})
+                if len(results) >= 10: break
+    except: pass
     return results
 
 def search_web_companies(keyword, sector, location="", country="", limit=6):
@@ -68,37 +75,33 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
     # Bloklanma ihtimali düşük, kurumsal odaklı sorgular
     queries = [
         f"{keyword} {sector} {q_loc} iletişim",
-        f"{keyword} {q_loc} industrial manufacturer",
-        f"site:linkedin.com/company/ {keyword} {q_loc}"
+        f"{keyword} {q_loc} industrial manufacturer"
     ]
     
     for q in queries:
         if len(final_results) >= (limit + 5): break
         
         batch = []
-        # Önce Tarayıcı Denemesi
+        # Önce Tarayıcı Denemesi (Yahoo)
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(headless=True)
-                ctx = browser.new_context(ignore_https_errors=True)
+                ctx = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", ignore_https_errors=True)
                 page = ctx.new_page()
-                print(f"🔍 Deneniyor: {q}")
-                page.goto(f"https://www.bing.com/search?q={q}", wait_until="load", timeout=20000)
-                items = page.query_selector_all('li.b_algo')
+                print(f"🔍 Deneniyor (Yahoo): {q}")
+                page.goto(f"https://search.yahoo.com/search?p={q}", wait_until="load", timeout=30000)
+                items = page.query_selector_all('div.compTitle a')
                 for item in items[:10]:
                     try:
-                        t_el = item.query_selector('h2 a')
-                        if t_el:
-                            href = t_el.get_attribute("href")
-                            if href: batch.append({"title": t_el.inner_text(), "href": href, "body": ""})
+                        href = item.get_attribute("href")
+                        if href: batch.append({"title": item.inner_text(), "href": href, "body": ""})
                     except: continue
                 browser.close()
                 if batch: print(f"✅ Tarayıcı üzerinden {len(batch)} sonuç bulundu.")
         except Exception as e:
-            print(f"⚠️ Tarayıcı Hatası (Yedek Motor Devreye Giriyor): {e}")
-            batch = []
+            print(f"⚠️ Tarayıcı hatası: {e}")
+            pass
             
-        # Eğer tarayıcı boş döndüyse veya hata verdiyse Fallback'i kullan
         if not batch:
             print(f"⚡ Fallback motoru çalışıyor: {q}")
             batch = get_fallback_results(q)
@@ -108,7 +111,6 @@ def search_web_companies(keyword, sector, location="", country="", limit=6):
             url = item['href']
             if not url or not is_allowed_domain(url) or not url.startswith('http'): continue
             
-            # LinkedIn Kişi/İş Filtresi
             if "linkedin.com" in url.lower():
                 if "/company/" not in url.lower() and "/school/" not in url.lower(): continue
             
@@ -132,5 +134,56 @@ def read_website_content(url):
     except: return "Hata"
 
 def search_linkedin_companies(keyword, sector, location="", li_at=None, limit=5):
-    # Ana search_web_companies fonksiyonu artık LinkedIn'i de kapsıyor.
+    """Eski fonksiyon - artık openclaw_discover_companies kullanılıyor."""
+    return []
+
+def openclaw_discover_companies(keyword, sector, location="", country="", limit=6):
+    """OpenClaw Gateway üzerinden ajan kullanarak şirket keşfeder."""
+    gateway_url = os.getenv("OPENCLAW_GATEWAY_URL", "http://localhost:18789")
+    gateway_token = os.getenv("OPENCLAW_API_KEY", "demo-openclaw-token")
+    
+    q_loc = f"{location} {country}".strip()
+    prompt = f"""Ekteki kriterlere uygun sirketleri bul ve bana JSON formatinda bir liste don.
+Kriterler:
+- Urun/Keyword: {keyword}
+- Sektor: {sector}
+- Lokasyon: {q_loc}
+
+Gorevin: Hem web sitelerini hem de LinkedIn sirket profillerini (linkedin.com/company/...) arastir. 
+Sadece kurumsal firmalari bul.
+Donus Formati (Sadece JSON):
+[
+  {{"company_name": "Firma Adi", "website": "URL", "is_linkedin": true/false}},
+  ...
+]"""
+
+    try:
+        url = f"{gateway_url}/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {gateway_token}"}
+        payload = {
+            "model": "research-agent", # OpenClaw'in arastirma ajani
+            "messages": [
+                {"role": "system", "content": "Sen profesyonel bir pazar arastirmacisisin. Gorevin istenen sirketleri bulmak ve sadece istenen JSON formatinda veri donmektir."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3
+        }
+        
+        print(f"📡 OpenClaw Ajanı Görevlendiriliyor: {keyword} in {sector}")
+        resp = requests.post(url, json=payload, timeout=120)
+        
+        if resp.status_code == 200:
+            content = resp.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+            # JSON'u ayikla
+            match = re.search(r'\[.*\]', content, re.DOTALL)
+            if match:
+                results = json.loads(match.group(0))
+                # Mevcut skorlama sistemine uydurmak icin 'score' ve 'snippet' ekle
+                for res in results:
+                    res['score'] = 100 # Ajan bulduysa zaten kalitelidir
+                    res['snippet'] = f"{sector} alanında {keyword} uzmanı."
+                return results[:limit]
+    except Exception as e:
+        print(f"❌ OpenClaw Ajan Hatası: {e}")
+    
     return []

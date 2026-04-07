@@ -1,12 +1,13 @@
-models:
-  providers:
-    ollama:
-      baseUrl: "http://172.16.44.8:11434"
-      apiKey: "ollama-local"
-      api: "ollama"
-      models:
-        - id: "qwen2.5:14b"
-          name: "Qwen 2.5 14B"
+runtimeHome: "/app/runtime-home"
+
+providers:
+  ollama:
+    baseUrl: "http://172.16.41.43:11434"
+    apiKey: "ollama-local"
+    api: "ollama"
+    models:
+      - id: "qwen2.5:14b"
+        name: "Qwen 2.5 14B"
 
 gateway:
   mode: "local"
