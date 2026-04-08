@@ -25,8 +25,9 @@ def load_secure_settings():
     """Çevresel değişkenleri (.env) yükler."""
     settings = {
         "LINKEDIN_SESSION_TOKEN": "",
-        "GATEWAY_PASSWORD": "demo-openclaw-token",
-        "N8N_WEBHOOK_URL": os.getenv("N8N_WEBHOOK_URL", "")
+        "N8N_WEBHOOK_URL": os.getenv("N8N_WEBHOOK_URL", ""),
+        "OLLAMA_BASE_URL": os.getenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434"),
+        "OLLAMA_MODEL": os.getenv("OLLAMA_MODEL", "qwen2.5:14b"),
     }
     if os.path.exists(ENV_PATH):
         with open(ENV_PATH, "r", encoding="utf-8") as f:
@@ -210,34 +211,26 @@ st.markdown("""
 # ==========================================
 # LLM BRIDGE (ROBUST HTTP + SPEED TEST)
 # ==========================================
-def call_llm_raw(messages, mode="direct", gateway_pw="", timeout=20):
-    """SDK kullanmadan, doğrudan HTTP üzerinden Yapay Zeka ile konuşur."""
-    if mode == "direct":
-        base_url = settings.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-        url = f"{base_url}/api/chat"
-        payload = {
-            "model": settings.get("OLLAMA_MODEL", "qwen2.5:14b"),
-            "messages": messages,
-            "stream": False,
-            "options": {"num_ctx": 4096, "temperature": 0.2, "num_predict": 1500}
-        }
-    else:
-        url = "http://127.0.0.1:18789/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {gateway_pw}"}
-        payload = {"model": f"ollama/{settings.get('OLLAMA_MODEL', 'qwen2.5:14b')}", "messages": messages, "stream": False, "temperature": 0.2, "max_tokens": 1500}
-
+def call_llm_raw(messages, timeout=60):
+    """Ollama'ya direkt HTTP isteği gönderir."""
+    base_url = settings.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434").rstrip("/")
+    url = f"{base_url}/api/chat"
+    payload = {
+        "model": settings.get("OLLAMA_MODEL", "qwen2.5:14b"),
+        "messages": messages,
+        "stream": False,
+        "options": {"num_ctx": 4096, "temperature": 0.2, "num_predict": 1500}
+    }
     try:
         start_t = time.time()
         response = requests.post(url, json=payload, timeout=timeout)
         end_t = time.time()
-        
         if response.status_code == 200:
-            res_json = response.json()
-            content = res_json.get("message", {}).get("content", "") if mode == "direct" else res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = response.json().get("message", {}).get("content", "")
             return content, f"{end_t-start_t:.1f}sn"
         return None, f"Hata: {response.status_code}"
     except Exception as e:
-        return None, f"Zira: {str(e)}"
+        return None, str(e)
 
 def send_to_n8n(data):
     """Bulunan adayları n8n webhook'una gönderir."""
@@ -287,7 +280,6 @@ with st.sidebar:
     selected_city = st.text_input("Şehir", placeholder="Örn: Istanbul, Izmir, Berlin")
 
     # Arka planda varsayılan ayarlar (UI'dan kaldırıldı)
-    direct_mode = False 
 
     if st.button("🗑️ Önbelleği Temizle", use_container_width=True):
         st.cache_data.clear()
@@ -318,34 +310,44 @@ if not sector or not product:
 else:
     if st.sidebar.button("🚀 Kapsamlı Analizi Başlat", use_container_width=True, type="primary"):
         findings_area = st.empty()
-        found_set = set()
-        
+        found_set = []  # set yerine list: sıra korunur, URL eşleşmesi bozulmaz
+
         # --- SMART START: OPENCLAW AGENTIC DISCOVERY ---
         st.warning(f"⚡ **OpenClaw Ajanı Görevlendirildi: '{sector}' sektörü için derin araştırma yapılıyor...**")
-        
+
         with st.status("🔍 OpenClaw Ajanı Şirketleri Keşfediyor...", expanded=True) as status:
             # 1. OpenClaw Agent Discovery
             discovered_data = openclaw_discover_companies(product, sector, selected_city, selected_country, limit=10)
-            
+
             status.update(label=f"✅ {len(discovered_data)} Nitelikli Şirket Bulundu", state="complete")
-            
+
             # Yeni bir arama başladığında eski sonuçları temizle
             st.session_state.current_results = []
-            
+
             # --- DATA INTEGRATION & MEMORY FILTER ---
             for item in discovered_data:
-                url = item.get("website", "")
-                if url in st.session_state.seen_urls: continue
-                
+                memory_key = item.get("linkedin_url") or item.get("website", "")
+                if memory_key in st.session_state.seen_urls:
+                    continue
                 name = item.get("company_name", "Bilinmeyen")
-                is_li = item.get("is_linkedin", False)
-                
-                icon = "🟦" if is_li else "🌐"
-                label = "LINKEDIN" if is_li else "WEB"
-                findings_area.markdown(f"{icon} **[{label}]** {name} | [Bağlantıya Git 🔗]({url})")
-                
-                found_set.add(name)
-                st.session_state.seen_urls.add(url)
+                found_set.append(name)
+                st.session_state.seen_urls.add(memory_key)
+
+        # Keşif listesini link_button ile göster
+        findings_area.empty()
+        st.subheader("Bulunan Firmalar")
+        for item in discovered_data:
+            website_url = item.get("website", "")
+            linkedin_url = item.get("linkedin_url", "")
+            url = linkedin_url or website_url
+            name = item.get("company_name", "Bilinmeyen")
+            is_li = item.get("is_linkedin", False)
+            label = "🟦 LinkedIn" if is_li else "🌐 Web"
+            if not is_li and linkedin_url:
+                label = "Web + LinkedIn"
+            col_a, col_b = st.columns([3, 1])
+            col_a.markdown(f"**{name}** — {label}")
+            col_b.markdown(f'<a href="{url}" target="_blank" style="display:block;text-align:center;background:#EC6602;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;">Aç</a>', unsafe_allow_html=True)
 
         if not found_set:
             st.error("❌ OpenClaw belirlenen kriterlerde yeni şirket bulamadı.")
@@ -355,30 +357,28 @@ else:
         st.divider()
         st.subheader("🧐 Detaylı Firma Analiz Raporları")
         analysis_area = st.container()
-        
-        m_str = "direct" if direct_mode else "gateway"
-        g_pw = settings.get("GATEWAY_PASSWORD", "demo-openclaw-token")
 
-        messages_history = [
-            {"role": "system", "content": "Sen kıdemli bir iş analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'analysis' kısmına bu firmanın tam olarak NE YAPTIĞINI detaylıca raporla. 'sales_script' kısmına ise bu firmaya özel, LinkedIn üzerinden gönderilecek etkileyici bir satış mesajı hazırla. Format: `{\"score\": 9, \"analysis\": \"...\", \"sales_script\": \"...\"}`"},
-            {"role": "user", "content": f"Ürün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\nAdaylarımız: {list(found_set)}\nNOT: Her firma için detaylı faaliyet analizi ve kişiye özel satış metni üret."}
-        ]
 
-        # 5 ADAY ANALİZİ
-        for i, comp in enumerate(list(found_set)[:5]): 
+        system_prompt = {"role": "system", "content": "Sen kıdemli bir iş analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'analysis' kısmına bu firmanın tam olarak NE YAPTIĞINI detaylıca raporla. 'sales_script' kısmına ise bu firmaya özel, LinkedIn üzerinden gönderilecek etkileyici bir satış mesajı hazırla. Format: `{\"score\": 9, \"analysis\": \"...\", \"sales_script\": \"...\"}`"}
+
+        # 5 ADAY ANALİZİ — her firma için bağımsız LLM çağrısı
+        for i, comp in enumerate(found_set[:5]): 
             with analysis_area:
                 with st.expander(f"📌 Analiz ve Teklif: {comp}", expanded=True):
                     # 1. Siteyi bul ve içeriği al
-                    company_url = next((item["website"] for item in discovered_data if item["company_name"] == comp), "")
+                    company_item = next((item for item in discovered_data if item["company_name"] == comp), {})
+                    company_url = company_item.get("website", "")
+                    linkedin_url = company_item.get("linkedin_url", "")
+                    lead_url = linkedin_url or company_url
                     with st.status(f"🌐 {comp} araştırılıyor...", expanded=False) as s:
-                        read_res = read_website_content(company_url)
+                        read_res = read_website_content(company_url, linkedin_token=session_token)
                         s.update(label=f"✅ {comp} incelendi", state="complete")
                     
-                    # 2. AI'ya analiz ettir
+                    # 2. AI'ya analiz ettir (her firma için bağımsız çağrı)
                     with st.spinner("🤖 Derin analiz yapılıyor..."):
-                        prompt = f"Şu veriye göre {comp} için detaylı faaliyet raporu hazırla:\n{read_res[:2500]}"
-                        messages_history.append({"role": "user", "content": prompt})
-                        ai_ana, info = call_llm_raw(messages_history, mode=m_str, gateway_pw=g_pw, timeout=60)
+                        prompt = f"Firma: {comp}\nÜrün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\n\nWeb sitesi içeriği:\n{read_res[:2500]}"
+                        messages = [system_prompt, {"role": "user", "content": prompt}]
+                        ai_ana, info = call_llm_raw(messages, timeout=60)
                         
                         # 3. ANALİZ KARTINI BAS (JSON TEMİZLEME)
                         f_score = 5
@@ -398,9 +398,12 @@ else:
                         except:
                             pass
 
-                        col1, col2 = st.columns([1, 4])
+                        col1, col2, col3 = st.columns([1, 4, 1])
                         col1.metric("Uygunluk", f"{f_score}/10")
                         col2.markdown(f"**🔍 Profesyonel Faaliyet Raporu:**\n\n{f_analysis}")
+                        if lead_url:
+                            button_label = "LinkedIn'e Git" if linkedin_url else "Siteye Git"
+                            col3.markdown(f'<a href="{lead_url}" target="_blank" style="display:block;text-align:center;background:#EC6602;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:600;">{button_label}</a>', unsafe_allow_html=True)
                         with st.expander("✉️ Hazırlanan Satış Mesajı"):
                             st.write(f_script)
                         st.caption(f"🤖 Kaynak Bilgisi & Hız: {info}")
@@ -412,7 +415,9 @@ else:
                             "Detaylı Analiz": f_analysis,
                             "Sales Script": f_script,
                             "Kaynak": info,
-                            "URL": company_url
+                            "Website": company_url,
+                            "LinkedIn URL": linkedin_url,
+                            "URL": lead_url
                         })
 
         st.success("🏁 Şirket analizleri başarıyla tamamlandı. Raporunuz hazır!")
@@ -474,8 +479,11 @@ if st.session_state.current_results:
             worksheet.set_column('A:A', 25, body_format) # Şirket
             worksheet.set_column('B:B', 10, body_format) # Skor
             worksheet.set_column('C:C', 85, body_format) # Detaylı Analiz (Genişletildi)
-            worksheet.set_column('D:D', 15, body_format) # Kaynak
-            worksheet.set_column('E:E', 40, body_format) # URL
+            worksheet.set_column('D:D', 55, body_format) # Sales Script
+            worksheet.set_column('E:E', 15, body_format) # Kaynak
+            worksheet.set_column('F:F', 40, body_format) # Website
+            worksheet.set_column('G:G', 40, body_format) # LinkedIn URL
+            worksheet.set_column('H:H', 40, body_format) # URL
             
             # Satır yüksekliğini otomatik ayarla (Metin kaydırma için)
             worksheet.set_default_row(60)

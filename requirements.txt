@@ -1,5 +1,6 @@
 streamlit
-duckduckgo-search
+flask
+ddgs
 playwright
 trafilatura
 requests

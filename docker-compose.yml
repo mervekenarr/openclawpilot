@@ -36,23 +36,12 @@ services:
       postgres:
         condition: service_healthy
 
-  openclaw-gateway:
-    image: ghcr.io/openclaw/openclaw:latest
-    container_name: openclaw_brain
-    ports:
-      - "18789:18789"
-    volumes:
-      - ./openclaw.yml:/app/openclaw.yml
-      - ./ops/openclaw/runtime-home:/app/runtime-home
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
   openclaw-sales-assistant:
     build: .
     container_name: openclaw_sales_bot
     ports:
       - "8501:8501"
+      - "8502:8502"
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - LINKEDIN_SESSION_TOKEN=${LINKEDIN_SESSION_TOKEN}
@@ -64,7 +53,6 @@ services:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
     depends_on:
-      - openclaw-gateway
       - n8n
 
 volumes:
