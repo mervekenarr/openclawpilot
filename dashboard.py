@@ -4,7 +4,7 @@ import json
 import time
 import requests
 import re
-from engine import openclaw_discover_companies, read_website_content
+from engine import BLOCKED_HOST_TOKENS, openclaw_discover_companies, read_website_content
 import pandas as pd
 import io
 
@@ -221,16 +221,162 @@ def call_llm_raw(messages, timeout=60):
         "stream": False,
         "options": {"num_ctx": 4096, "temperature": 0.2, "num_predict": 1500}
     }
+    last_error = None
+    for attempt in range(2):
+        try:
+            start_t = time.time()
+            response = requests.post(url, json=payload, timeout=timeout)
+            end_t = time.time()
+            if response.status_code == 200:
+                content = response.json().get("message", {}).get("content", "")
+                if content and len(content.strip()) > 10:
+                    info = f"{end_t-start_t:.1f}sn"
+                    if attempt:
+                        info += f" (retry {attempt})"
+                    return content, info
+                last_error = "Bos LLM cevabi"
+            else:
+                last_error = f"Hata: {response.status_code}"
+        except Exception as e:
+            last_error = str(e)
+        time.sleep(1.2)
+    return None, last_error or "LLM hatasi"
+
+
+def has_meaningful_content(value):
+    text = (value or "").strip()
+    if not text:
+        return False
+    invalid_markers = {
+        "hata",
+        "analiz yapilamadi.",
+        "analiz yapÄ±lamadÄ±.",
+        "linkedin sayfasi okundu ama icerik cikarilamadi.",
+        "linkedin sayfasÄ± okundu ama iÃ§erik Ã§Ä±karÄ±lamadÄ±.",
+    }
+    return text.lower() not in invalid_markers and len(text) > 40
+
+
+def build_company_context(company_name, product, sector, city, country, company_item, session_token):
+    website_url = company_item.get("website", "")
+    linkedin_url = company_item.get("linkedin_url", "")
+    snippet = (company_item.get("snippet") or "").strip()
+
+    sources = []
+    if website_url:
+        sources.append(("website", website_url))
+    if linkedin_url and linkedin_url != website_url:
+        sources.append(("linkedin", linkedin_url))
+
+    content_parts = []
+    source_notes = []
+
+    for source_type, url in sources:
+        content = read_website_content(url, linkedin_token=session_token)
+        if has_meaningful_content(content):
+            label = "Web sitesi" if source_type == "website" else "LinkedIn"
+            content_parts.append(f"{label} ({url}):\n{content[:2500]}")
+            source_notes.append(label)
+
+    if snippet:
+        content_parts.append(f"Arama ozeti:\n{snippet[:500]}")
+        source_notes.append("Arama ozeti")
+
+    if not content_parts:
+        fallback_context = [
+            f"Firma adi: {company_name}",
+            f"Urun/anahtar kelime: {product}",
+            f"Sektor: {sector}",
+            f"Lokasyon: {city}/{country}",
+        ]
+        if website_url:
+            fallback_context.append(f"Website: {website_url}")
+        if linkedin_url:
+            fallback_context.append(f"LinkedIn: {linkedin_url}")
+        if snippet:
+            fallback_context.append(f"Ozet: {snippet[:300]}")
+        return "\n".join(fallback_context), "Kaynak bulunamadi"
+
+    return "\n\n".join(content_parts), " + ".join(source_notes)
+
+
+def parse_analysis_response(raw_text):
+    default_analysis = "Analiz yapilamadi."
+    default_script = "Mesaj hazirlanamadi."
+    score = 5
+    analysis = default_analysis
+    script = default_script
+
     try:
-        start_t = time.time()
-        response = requests.post(url, json=payload, timeout=timeout)
-        end_t = time.time()
-        if response.status_code == 200:
-            content = response.json().get("message", {}).get("content", "")
-            return content, f"{end_t-start_t:.1f}sn"
-        return None, f"Hata: {response.status_code}"
-    except Exception as e:
-        return None, str(e)
+        if raw_text:
+            match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group(0))
+                score = int(parsed.get("score", 5))
+                analysis = (parsed.get("analysis") or analysis).strip()
+                script = (parsed.get("sales_script") or script).strip()
+            elif len(raw_text.strip()) > 20:
+                analysis = raw_text.strip()
+    except Exception:
+        pass
+
+    score = max(1, min(score, 10))
+    return score, analysis, script
+
+
+def generate_fallback_sales_script(company_name, product, sector, city, country):
+    return (
+        f"Merhaba, {company_name} icin hazirladigimiz cozumlerin "
+        f"{sector} alanindaki operasyonlara ve {product} ihtiyaclarina destek olabilecegini dusunuyoruz. "
+        f"{city or country} tarafindaki hedefleriniz uygunsa kisa bir gorusmede tanismak isteriz."
+    )
+
+
+def analyze_company(company_name, product, sector, city, country, company_context):
+    system_prompt = {
+        "role": "system",
+        "content": (
+            "Sen kidemli bir is analistisin. Verilen kaynaklara dayanarak sirketin faaliyetlerini ozetle, "
+            "uygunluk puani ver ve LinkedIn icin kisa ama profesyonel bir satis mesaji hazirla. "
+            "Yanit formati yalnizca JSON olsun: "
+            "{\"score\": 9, \"analysis\": \"...\", \"sales_script\": \"...\"}"
+        ),
+    }
+    user_prompt = (
+        f"Firma: {company_name}\n"
+        f"Urun: {product}\n"
+        f"Sektor: {sector}\n"
+        f"Lokasyon: {city}/{country}\n\n"
+        f"Kaynak icerigi:\n{company_context}"
+    )
+
+    attempts = [
+        [system_prompt, {"role": "user", "content": user_prompt}],
+        [
+            system_prompt,
+            {
+                "role": "user",
+                "content": user_prompt
+                + "\n\nJSON disinda hicbir sey yazma. Analysis alani en az 3 cumle, sales_script alani en az 2 cumle olsun.",
+            },
+        ],
+    ]
+
+    last_info = ""
+    for messages in attempts:
+        raw, info = call_llm_raw(messages, timeout=75)
+        last_info = info
+        score, analysis, script = parse_analysis_response(raw)
+        if has_meaningful_content(analysis) and has_meaningful_content(script):
+            return score, analysis, script, info
+
+    fallback_analysis = (
+        f"{company_name} icin otomatik derin analiz tamamlanamadi ancak bulunan kaynaklar, "
+        f"firmanin {sector} alaninda {product} ile iliskili bir faaliyet gosterdigini isaret ediyor. "
+        "Kesin faaliyet kapsaminin teyidi icin firma sayfasi veya LinkedIn profili manuel olarak gozden gecirilebilir."
+    )
+    fallback_script = generate_fallback_sales_script(company_name, product, sector, city, country)
+    return 5, fallback_analysis, fallback_script, last_info or "LLM fallback"
 
 def send_to_n8n(data):
     """Bulunan adayları n8n webhook'una gönderir."""
@@ -371,7 +517,16 @@ else:
                     linkedin_url = company_item.get("linkedin_url", "")
                     lead_url = linkedin_url or company_url
                     with st.status(f"🌐 {comp} araştırılıyor...", expanded=False) as s:
-                        read_res = read_website_content(company_url, linkedin_token=session_token)
+                        company_context, source_info = build_company_context(
+                            comp,
+                            product,
+                            sector,
+                            selected_city,
+                            selected_country,
+                            company_item,
+                            session_token,
+                        )
+                        read_res = company_context
                         s.update(label=f"✅ {comp} incelendi", state="complete")
                     
                     # 2. AI'ya analiz ettir (her firma için bağımsız çağrı)
@@ -397,6 +552,21 @@ else:
                                     f_analysis = ai_ana if len(ai_ana) > 20 else f_analysis
                         except:
                             pass
+
+                        if not has_meaningful_content(f_analysis):
+                            f_analysis = (
+                                f"{comp} icin otomatik derin analiz tam dolmadi. "
+                                f"Bulunan kaynaklar firmanin {sector} alaninda {product} ile iliskili olabilecegini gosteriyor. "
+                                "Kesin faaliyet kapsami icin firma sayfasi veya LinkedIn profili manuel olarak teyit edilmelidir."
+                            )
+                        if not has_meaningful_content(f_script):
+                            f_script = generate_fallback_sales_script(
+                                comp,
+                                product,
+                                sector,
+                                selected_city,
+                                selected_country,
+                            )
 
                         col1, col2, col3 = st.columns([1, 4, 1])
                         col1.metric("Uygunluk", f"{f_score}/10")

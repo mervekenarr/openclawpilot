@@ -45,6 +45,8 @@ services:
     environment:
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
       - LINKEDIN_SESSION_TOKEN=${LINKEDIN_SESSION_TOKEN}
+      - LINKEDIN_NAV_TIMEOUT_MS=${LINKEDIN_NAV_TIMEOUT_MS:-30000}
+      - LINKEDIN_MAX_EMPLOYEE_CANDIDATES=${LINKEDIN_MAX_EMPLOYEE_CANDIDATES:-3}
       - OPENCLAW_GATEWAY_URL=http://openclaw-gateway:18789
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/leads
     volumes:
