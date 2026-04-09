@@ -411,12 +411,21 @@ else:
                         # Rapor için veriyi sakla
                         st.session_state.current_results.append({
                             "Şirket": comp,
+                            "Sirket": comp,
+                            "company_name": comp,
                             "Skor": f_score,
+                            "score": f_score,
                             "Detaylı Analiz": f_analysis,
+                            "analysis": f_analysis,
                             "Sales Script": f_script,
+                            "sales_script": f_script,
+                            "message": f_script,
                             "Kaynak": info,
+                            "kaynak": info,
                             "Website": company_url,
+                            "website": company_url,
                             "LinkedIn URL": linkedin_url,
+                            "linkedin_url": linkedin_url,
                             "URL": lead_url
                         })
 

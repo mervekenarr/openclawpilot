@@ -1,0 +1,224 @@
+{
+  "name": "OpenClaw - LinkedIn Lead Pipeline v2",
+  "nodes": [
+    {
+      "id": "n1",
+      "name": "Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ],
+      "parameters": {
+        "multipleMethods": false,
+        "httpMethod": "POST",
+        "path": "6c2484b5-9109-415a-832d-2be88b5b8911",
+        "authentication": "none",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "webhookId": "6c2484b5-9109-415a-832d-2be88b5b8911"
+    },
+    {
+      "id": "n2",
+      "name": "Leadleri Normalize Et",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const payload = items[0].json.body ?? items[0].json;\nconst leads = Array.isArray(payload) ? payload : (payload.leads ?? [payload]);\n\nfunction cleanString(value) {\n  return typeof value === 'string' ? value.trim() : '';\n}\n\nfunction pickLeadUrl(item) {\n  const explicitLinkedin = cleanString(item['LinkedIn URL'] || item.linkedin_url);\n  const fallbackUrl = cleanString(item.URL || item.website || '');\n  if (explicitLinkedin) return explicitLinkedin;\n  return fallbackUrl.includes('linkedin.com/company/') ? fallbackUrl : '';\n}\n\nreturn leads.map((item, index) => {\n  const linkedinUrl = pickLeadUrl(item);\n  const website = cleanString(item.Website || item.website || '');\n  const salesScript = cleanString(item['Sales Script'] || item.sales_script || item.message || item.gonderilecek_mesaj || '');\n\n  return {\n    json: {\n      source_index: index,\n      sirket: cleanString(item.company_name || item.sirket || item.Sirket || ''),\n      skor: Number(item.score || item.Skor || 0),\n      website,\n      linkedin_url: linkedinUrl,\n      lead_url: linkedinUrl || website,\n      mesaj: salesScript,\n      kaynak: cleanString(item.kaynak || item.Kaynak || ''),\n      detayli_analiz: cleanString(item.analysis || item.detayli_analiz || ''),\n      lead_type: linkedinUrl ? 'linkedin_ready' : 'web_only'\n    }\n  };\n});"
+      }
+    },
+    {
+      "id": "n3",
+      "name": "LinkedIn Hazir Mi",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        760,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.linkedin_url }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "n4",
+      "name": "LinkedIn Mesaj At",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1040,
+        210
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "http://openclaw_sales_bot:8502/send-message",
+        "authentication": "none",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ linkedin_url: $json.linkedin_url, message: $json.mesaj, company_name: $json.sirket }) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "neverError": true,
+              "responseFormat": "autodetect"
+            }
+          },
+          "timeout": 120000
+        }
+      }
+    },
+    {
+      "id": "n5",
+      "name": "Web Leadlerini Isaretle",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        1040,
+        390
+      ],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "delivery-status",
+              "name": "delivery_status",
+              "value": "web_only",
+              "type": "string"
+            },
+            {
+              "id": "delivery-detail",
+              "name": "delivery_detail",
+              "value": "LinkedIn URL bulunamadi. Manuel takip veya zenginlestirme gerekli.",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "n6",
+      "name": "Sonuclari Birlestir",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        1310,
+        300
+      ],
+      "parameters": {
+        "mode": "append"
+      }
+    }
+  ],
+  "connections": {
+    "Lead Webhook": {
+      "main": [
+        [
+          {
+            "node": "Leadleri Normalize Et",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leadleri Normalize Et": {
+      "main": [
+        [
+          {
+            "node": "LinkedIn Hazir Mi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn Hazir Mi": {
+      "main": [
+        [
+          {
+            "node": "LinkedIn Mesaj At",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Web Leadlerini Isaretle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LinkedIn Mesaj At": {
+      "main": [
+        [
+          {
+            "node": "Sonuclari Birlestir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Web Leadlerini Isaretle": {
+      "main": [
+        [
+          {
+            "node": "Sonuclari Birlestir",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "pinData": {},
+  "versionId": "openclaw-linkedin-pipeline-v2"
+}
