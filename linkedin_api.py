@@ -11,6 +11,7 @@ Strategy:
 from flask import Flask, request, jsonify
 from playwright.sync_api import sync_playwright
 import logging
+import json
 import os
 import random
 import re
@@ -29,8 +30,16 @@ LINKEDIN_TOKEN = os.getenv("LINKEDIN_SESSION_TOKEN", "")
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("LINKEDIN_REQUEST_TIMEOUT", "85"))
 NAVIGATION_TIMEOUT_MS = int(os.getenv("LINKEDIN_NAV_TIMEOUT_MS", "20000"))
 MAX_EMPLOYEE_CANDIDATES = int(os.getenv("LINKEDIN_MAX_EMPLOYEE_CANDIDATES", "2"))
+MIN_REQUEST_GAP_SECONDS = float(os.getenv("LINKEDIN_MIN_GAP_SECONDS", "6"))
+RATE_LIMIT_BACKOFF_SECONDS = float(os.getenv("LINKEDIN_RATE_LIMIT_BACKOFF_SECONDS", "18"))
+DEBUG_SCREENSHOTS_ENABLED = os.getenv("LINKEDIN_DEBUG_SCREENSHOTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+LOG_SENSITIVE_DATA = os.getenv("LINKEDIN_LOG_SENSITIVE_DATA", "false").strip().lower() in {"1", "true", "yes", "on"}
+LINKEDIN_PERSISTENT_SESSION = os.getenv("LINKEDIN_PERSISTENT_SESSION", "true").strip().lower() in {"1", "true", "yes", "on"}
+LINKEDIN_USER_DATA_DIR = os.getenv("LINKEDIN_USER_DATA_DIR", "/app/runtime-home/linkedin-profile").strip() or "/app/runtime-home/linkedin-profile"
+LINKEDIN_STORAGE_STATE_PATH = os.getenv("LINKEDIN_STORAGE_STATE_PATH", "/app/runtime-home/linkedin-storage-state.json").strip() or "/app/runtime-home/linkedin-storage-state.json"
 
 _lock = threading.Lock()
+_last_request_finished_at = 0.0
 
 
 def time_left(deadline):
@@ -54,6 +63,88 @@ def human_delay(min_ms=800, max_ms=2000, deadline=None):
         return False
     time.sleep(delay_s)
     return True
+
+
+def enforce_request_spacing(deadline):
+    global _last_request_finished_at
+    if MIN_REQUEST_GAP_SECONDS <= 0:
+        return
+
+    remaining_gap = MIN_REQUEST_GAP_SECONDS - (time.monotonic() - _last_request_finished_at)
+    if remaining_gap <= 0:
+        return
+
+    ensure_time_budget(deadline, remaining_gap + 1, "linkedin request spacing")
+    log.info("Waiting %.1fs before the next LinkedIn company to reduce rate limiting", remaining_gap)
+    time.sleep(remaining_gap)
+
+
+def mask_company_name(value):
+    text = (value or "").strip()
+    if not text:
+        return "unknown-company"
+    if LOG_SENSITIVE_DATA:
+        return text
+    if len(text) <= 4:
+        return text[0] + "***" if text else "unknown-company"
+    return f"{text[:2]}***{text[-2:]}"
+
+
+def mask_url(url):
+    text = (url or "").strip()
+    if not text:
+        return "unknown-url"
+    if LOG_SENSITIVE_DATA:
+        return text
+
+    parsed = urlparse(text if "://" in text else f"https://{text}")
+    host = parsed.netloc or parsed.path.split("/")[0] or "unknown-host"
+    path = parsed.path.strip("/")
+    if not path:
+        return host
+
+    parts = [part for part in path.split("/") if part]
+    last = parts[-1] if parts else ""
+    if len(last) > 6:
+        last = f"{last[:3]}***{last[-2:]}"
+    elif last:
+        last = f"{last[:1]}***"
+    return f"{host}/.../{last}" if last else host
+
+
+def sanitize_error_text(value):
+    text = str(value or "")
+    if LOG_SENSITIVE_DATA:
+        return text
+    text = re.sub(r"https?://[^\s)\"']+", "[redacted-url]", text)
+    text = re.sub(r"www\.[^\s)\"']+", "[redacted-url]", text)
+    return text
+
+
+def ensure_profile_dir():
+    if not LINKEDIN_USER_DATA_DIR:
+        return ""
+    os.makedirs(LINKEDIN_USER_DATA_DIR, exist_ok=True)
+    return LINKEDIN_USER_DATA_DIR
+
+
+def load_storage_state():
+    if not LINKEDIN_STORAGE_STATE_PATH or not os.path.exists(LINKEDIN_STORAGE_STATE_PATH):
+        return {}
+    try:
+        with open(LINKEDIN_STORAGE_STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:
+        log.warning("Could not read LinkedIn storage state file: %s", sanitize_error_text(exc))
+        return {}
+
+
+def has_storage_state():
+    return bool(load_storage_state())
+
+
+def has_linkedin_auth():
+    return bool(LINKEDIN_TOKEN) or has_storage_state()
 
 
 def normalize_text(value):
@@ -123,6 +214,7 @@ def build_company_url_variants(company_url):
         return [normalized] if normalized else [raw]
 
     original_slug = unquote(match.group(1)).strip()
+    suffix = path[match.end():].strip("/")
     slug_candidates = []
     for slug in [original_slug, ascii_slugify(original_slug)]:
         if slug and slug not in slug_candidates:
@@ -131,6 +223,8 @@ def build_company_url_variants(company_url):
     variants = []
     for slug in slug_candidates:
         candidate = f"https://www.linkedin.com/company/{quote(slug, safe='-')}/"
+        if suffix:
+            candidate += f"{suffix}/"
         if candidate not in variants:
             variants.append(candidate)
     return variants
@@ -161,7 +255,35 @@ def page_has_auth_wall(page):
     return any(token in body_text for token in auth_tokens)
 
 
+def page_has_rate_limit(page):
+    try:
+        current_url = (page.url or "").lower()
+    except Exception:
+        current_url = ""
+
+    if "error-1015" in current_url or "rate" in current_url and "limit" in current_url:
+        return True
+
+    try:
+        body_text = normalize_text((page.locator("body").inner_text(timeout=1500) or "")[:1600])
+    except Exception:
+        body_text = ""
+
+    rate_limit_tokens = [
+        "error 1015",
+        "you are being rate limited",
+        "rate limit",
+        "too many requests",
+        "unusual activity",
+        "try again later",
+    ]
+    return any(token in body_text for token in rate_limit_tokens)
+
+
 def inspect_company_page_state(page):
+    if page_has_rate_limit(page):
+        return False, "rate_limit"
+
     selectors = [
         "h1",
         'button:has-text("Mesaj")',
@@ -236,7 +358,7 @@ def resolve_company_page_via_search(page, company_name, deadline):
         + quote(company_name)
         + "&origin=GLOBAL_SEARCH_HEADER"
     )
-    log.info("Trying company search fallback for %s", company_name)
+    log.info("Trying company search fallback for %s", mask_company_name(company_name))
     page.goto(search_url, timeout=min(12000, int(time_left(deadline) * 1000) - 500), wait_until="commit")
     human_delay(1200, 1800, deadline=deadline)
 
@@ -252,11 +374,50 @@ def resolve_company_page_via_search(page, company_name, deadline):
                 continue
             clean = normalize_linkedin_company_url(href)
             if clean:
-                log.info("Resolved company URL via search: %s", clean)
+                log.info("Resolved company URL via search: %s", mask_url(clean))
                 return clean
         except Exception:
             pass
     return ""
+
+
+def resolve_people_via_search(page, company_name, deadline):
+    if not company_name:
+        return []
+
+    ensure_time_budget(deadline, 8, "linkedin people search fallback")
+    search_url = (
+        "https://www.linkedin.com/search/results/people/?keywords="
+        + quote(company_name)
+        + "&origin=GLOBAL_SEARCH_HEADER"
+    )
+    log.info("Trying people search fallback for %s", mask_company_name(company_name))
+    page.goto(search_url, timeout=min(12000, int(time_left(deadline) * 1000) - 500), wait_until="commit")
+    human_delay(1200, 1800, deadline=deadline)
+
+    candidates = []
+    seen = set()
+    try:
+        hrefs = page.eval_on_selector_all(
+            "a[href*='/in/']",
+            "els => els.map(el => el.getAttribute('href')).filter(Boolean)",
+        )
+    except Exception:
+        hrefs = []
+
+    for href in hrefs:
+        if "/in/" not in href:
+            continue
+        base = href.split("?")[0]
+        clean = "https://www.linkedin.com" + base if base.startswith("/") else base
+        if clean in seen:
+            continue
+        seen.add(clean)
+        candidates.append(clean)
+        if len(candidates) >= MAX_EMPLOYEE_CANDIDATES:
+            break
+
+    return candidates
 
 
 def goto_with_retries(page, url, deadline, stage, minimum_seconds=8):
@@ -272,7 +433,7 @@ def goto_with_retries(page, url, deadline, stage, minimum_seconds=8):
             min(NAVIGATION_TIMEOUT_MS + (5000 if index > 1 else 0), int(time_left(deadline) * 1000) - 500),
         )
         try:
-            log.info("Navigating to %s (%s, attempt %s)", candidate, stage, index)
+            log.info("Navigating to %s (%s, attempt %s)", mask_url(candidate), stage, index)
             page.goto(candidate, timeout=timeout_ms, wait_until="commit")
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=min(5000, timeout_ms))
@@ -282,15 +443,24 @@ def goto_with_retries(page, url, deadline, stage, minimum_seconds=8):
                 shell_ready, shell_reason = wait_for_company_page_shell(page, timeout_ms=min(7000, timeout_ms))
                 if not shell_ready and shell_reason == "auth_wall":
                     save_debug_screenshot(page, "debug_company_auth_wall.png")
-                    raise TimeoutError(f"LinkedIn auth wall encountered for {candidate}")
+                    raise TimeoutError(f"LinkedIn auth wall encountered for {mask_url(candidate)}")
+                if not shell_ready and shell_reason == "rate_limit":
+                    save_debug_screenshot(page, "debug_company_rate_limit.png")
+                    raise TimeoutError(f"LinkedIn rate limit encountered for {mask_url(candidate)}")
                 if not shell_ready:
-                    log.info("Company shell not fully ready for %s; proceeding anyway (%s)", candidate, shell_reason)
+                    log.info("Company shell not fully ready for %s; proceeding anyway (%s)", mask_url(candidate), shell_reason)
                 else:
-                    log.info("Company shell ready for %s via %s", candidate, shell_reason)
+                    log.info("Company shell ready for %s via %s", mask_url(candidate), shell_reason)
             return candidate
         except Exception as exc:
             last_error = exc
-            log.warning("Navigation failed for %s (%s): %s", candidate, stage, exc)
+            log.warning("Navigation failed for %s (%s): %s", mask_url(candidate), stage, sanitize_error_text(exc))
+            if "ERR_TOO_MANY_REDIRECTS" in str(exc):
+                human_delay(
+                    int(RATE_LIMIT_BACKOFF_SECONDS * 1000),
+                    int((RATE_LIMIT_BACKOFF_SECONDS + 4) * 1000),
+                    deadline=deadline,
+                )
             human_delay(700, 1200, deadline=deadline)
 
     raise last_error or TimeoutError(f"Could not open {stage}")
@@ -436,6 +606,44 @@ def find_company_message_button(page):
         include_tokens=["mesaj", "message"],
         exclude_tokens=["mesaj gonder", "send message", "olustur", "compose", "paylas", "share"],
     )
+
+
+def find_company_message_button_via_more_menu(page, deadline):
+    more_button = find_clickable_by_tokens(
+        page,
+        include_tokens=["daha fazla", "more"],
+        exclude_tokens=["more filters", "filtre"],
+    )
+    if not more_button:
+        return None
+
+    try:
+        more_button.scroll_into_view_if_needed()
+    except Exception:
+        pass
+
+    for action_name, action in [
+        ("standard", lambda: more_button.click()),
+        ("force", lambda: more_button.click(force=True)),
+        ("dom", lambda: page.evaluate("(el) => el.click()", more_button)),
+    ]:
+        try:
+            action()
+            log.info("Opened more-actions menu via %s click", action_name)
+        except Exception:
+            continue
+
+        human_delay(250, 500, deadline=deadline)
+
+        message_candidate = find_clickable_by_tokens(
+            page,
+            include_tokens=["mesaj", "message"],
+            exclude_tokens=["mesaj gonder", "send message", "paylas", "share"],
+        )
+        if message_candidate and message_candidate != more_button:
+            return message_candidate
+
+    return None
 
 
 def find_message_input(page):
@@ -604,7 +812,7 @@ def activate_message_ui(page, msg_btn, deadline):
     if href and "linkedin.com" in href and "/messaging" in href:
         try:
             target = href if href.startswith("http") else f"https://www.linkedin.com{href}"
-            log.info("Navigating directly to messaging href: %s", target)
+            log.info("Navigating directly to messaging href: %s", mask_url(target))
             page.goto(target, timeout=min(12000, int(time_left(deadline) * 1000) - 500), wait_until="commit")
             for _ in range(6):
                 human_delay(400, 700, deadline=deadline)
@@ -616,7 +824,7 @@ def activate_message_ui(page, msg_btn, deadline):
                     log.info("Message surface detected after direct messaging navigation")
                     return True
         except Exception as exc:
-            log.info("Direct messaging navigation failed: %s", exc)
+            log.info("Direct messaging navigation failed: %s", sanitize_error_text(exc))
 
     return False
 
@@ -654,6 +862,53 @@ def wait_for_message_dialog(page, deadline):
             pass
 
     return None
+
+
+def ensure_people_page(page, company_url, deadline):
+    current_url = (page.url or "").lower()
+    if "/people/" in current_url:
+        return True
+
+    people_link = None
+    for sel in [
+        'a[href*="/people/"]',
+        'a:has-text("People")',
+        'a:has-text("Employees")',
+        'a:has-text("Çalışan")',
+        'a:has-text("Calisan")',
+    ]:
+        try:
+            candidate = page.query_selector(sel)
+            if candidate and candidate.is_visible():
+                people_link = candidate
+                break
+        except Exception:
+            pass
+
+    if people_link:
+        try:
+            href = (people_link.get_attribute("href") or "").strip()
+        except Exception:
+            href = ""
+
+        try:
+            people_link.click()
+            human_delay(1200, 1800, deadline=deadline)
+            if "/people/" in (page.url or "").lower():
+                return True
+        except Exception:
+            pass
+
+        if href and "/people/" in href:
+            target = href if href.startswith("http") else f"https://www.linkedin.com{href}"
+            goto_with_retries(page, target, deadline, "employee page", minimum_seconds=6)
+            human_delay(1200, 1800, deadline=deadline)
+            return "/people/" in (page.url or "").lower()
+
+    fallback = company_url.rstrip("/") + "/people/"
+    goto_with_retries(page, fallback, deadline, "employee page", minimum_seconds=6)
+    human_delay(1200, 1800, deadline=deadline)
+    return "/people/" in (page.url or "").lower()
 
 
 def choose_conversation_topic_if_needed(page, deadline):
@@ -769,40 +1024,153 @@ def choose_conversation_topic_if_needed(page, deadline):
 
 
 def save_debug_screenshot(page, name):
+    if not DEBUG_SCREENSHOTS_ENABLED:
+        return
     try:
         page.screenshot(path=name, full_page=True)
         log.info("Saved debug screenshot: %s", name)
     except Exception as exc:
-        log.warning("Could not save debug screenshot %s: %s", name, exc)
+        log.warning("Could not save debug screenshot %s: %s", name, sanitize_error_text(exc))
+
+
+def add_linkedin_session_cookie(ctx, token):
+    if not token:
+        return
+    try:
+        ctx.add_cookies(
+            [
+                {
+                    "name": "li_at",
+                    "value": token,
+                    "domain": ".linkedin.com",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "None",
+                }
+            ]
+        )
+    except Exception as exc:
+        log.warning("Could not seed LinkedIn session cookie into browser context: %s", sanitize_error_text(exc))
+
+
+def seed_storage_state(ctx, storage_state):
+    if not storage_state:
+        return
+
+    cookies = storage_state.get("cookies") or []
+    if cookies:
+        try:
+            ctx.add_cookies(cookies)
+        except Exception as exc:
+            log.warning("Could not seed storage-state cookies into browser context: %s", sanitize_error_text(exc))
+
+    origins = storage_state.get("origins") or []
+    for origin_item in origins:
+        origin = (origin_item or {}).get("origin")
+        local_items = (origin_item or {}).get("localStorage") or []
+        if not origin or not local_items:
+            continue
+
+        page = None
+        try:
+            page = ctx.new_page()
+            page.goto(origin, timeout=min(12000, NAVIGATION_TIMEOUT_MS), wait_until="commit")
+            page.evaluate(
+                """(entries) => {
+                    for (const entry of entries) {
+                        try {
+                            window.localStorage.setItem(entry.name, entry.value);
+                        } catch (e) {}
+                    }
+                }""",
+                local_items,
+            )
+        except Exception as exc:
+            log.info("Storage-state localStorage seed did not fully complete for %s: %s", mask_url(origin), sanitize_error_text(exc))
+        finally:
+            if page:
+                try:
+                    page.close()
+                except Exception:
+                    pass
+
+
+def warm_up_linkedin_session(ctx):
+    page = None
+    try:
+        page = ctx.new_page()
+        page.goto("https://www.linkedin.com/feed/", timeout=min(12000, NAVIGATION_TIMEOUT_MS), wait_until="commit")
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+    except Exception as exc:
+        log.info("LinkedIn session warm-up did not fully complete: %s", sanitize_error_text(exc))
+    finally:
+        if page:
+            try:
+                page.close()
+            except Exception:
+                pass
+
+
+STEALTH_SCRIPT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['tr-TR', 'tr', 'en-US', 'en'] });
+window.chrome = { runtime: {} };
+"""
 
 
 def setup_browser(playwright, token):
-    browser = playwright.chromium.launch(
-        headless=True,
-        args=["--no-sandbox", "--disable-dev-shm-usage"],
-    )
-    ctx = browser.new_context(
-        user_agent=(
+    common_args = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--window-size=1280,800",
+    ]
+    context_options = {
+        "user_agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/122.0.0.0 Safari/537.36"
         ),
-        locale="tr-TR",
-        viewport={"width": 1280, "height": 800},
-    )
-    ctx.add_cookies(
-        [
-            {
-                "name": "li_at",
-                "value": token,
-                "domain": ".linkedin.com",
-                "path": "/",
-            }
-        ]
-    )
+        "locale": "tr-TR",
+        "viewport": {"width": 1280, "height": 800},
+    }
+
+    headless = os.getenv("LINKEDIN_HEADLESS", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+    if LINKEDIN_PERSISTENT_SESSION:
+        profile_dir = ensure_profile_dir()
+        ctx = playwright.chromium.launch_persistent_context(
+            profile_dir,
+            headless=headless,
+            args=common_args,
+            **context_options,
+        )
+        close_target = ctx
+        log.info("Browser context created from persistent profile: %s (headless=%s)", profile_dir, headless)
+    else:
+        storage_state_path = LINKEDIN_STORAGE_STATE_PATH if has_storage_state() else None
+        browser = playwright.chromium.launch(headless=headless, args=common_args)
+        if storage_state_path:
+            ctx = browser.new_context(storage_state=storage_state_path, **context_options)
+            log.info("Browser context created from storage state: %s", mask_url(storage_state_path))
+        else:
+            ctx = browser.new_context(**context_options)
+            log.info("Browser context created without storage state")
+        close_target = browser
+
+    ctx.add_init_script(STEALTH_SCRIPT)
+    if token:
+        add_linkedin_session_cookie(ctx, token)
     ctx.set_default_timeout(5000)
     ctx.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
-    return browser, ctx
+    warm_up_linkedin_session(ctx)
+    return close_target, ctx
 
 
 def type_and_verify(textarea, message, deadline):
@@ -872,6 +1240,10 @@ def send_via_company_page(page, message, deadline):
         fallback_button = find_company_message_button(page)
         if fallback_button:
             message_buttons = [fallback_button]
+    if not message_buttons:
+        menu_button = find_company_message_button_via_more_menu(page, deadline)
+        if menu_button:
+            message_buttons = [menu_button]
 
     if not message_buttons:
         return None, "No message button on the company page"
@@ -930,11 +1302,19 @@ def send_via_employee(page, company_url, message, deadline):
     employees_url = company_url.rstrip("/") + "/people/"
     goto_with_retries(page, employees_url, deadline, "employee page", minimum_seconds=8)
     human_delay(1500, 2200, deadline=deadline)
+    company_name_hint = derive_company_name(company_url)
+
+    if page_has_rate_limit(page):
+        return None, "LinkedIn rate limited on employee page"
+    if page_has_auth_wall(page):
+        return None, "LinkedIn auth wall on employee page"
+    if not ensure_people_page(page, company_url, deadline):
+        return None, "People page could not be opened"
 
     seen = set()
     candidates = []
 
-    for _ in range(2):
+    for _ in range(4):
         try:
             hrefs = page.eval_on_selector_all(
                 "a[href*='/in/']",
@@ -959,10 +1339,16 @@ def send_via_employee(page, company_url, message, deadline):
             break
 
         try:
-            page.mouse.wheel(0, 1400)
+            page.mouse.wheel(0, 1800)
         except Exception:
             pass
-        human_delay(1000, 1500, deadline=deadline)
+        human_delay(1100, 1700, deadline=deadline)
+
+    if not candidates:
+        try:
+            candidates = resolve_people_via_search(page, company_name_hint, deadline)
+        except Exception as exc:
+            return None, f"No employee candidates found and people search failed: {exc}"
 
     if not candidates:
         return None, "No employee candidates found"
@@ -1004,22 +1390,24 @@ def send_via_employee(page, company_url, message, deadline):
 
 
 def find_and_message_company(company_url: str, message: str, token: str, company_name_hint: str = "") -> dict:
-    if not token:
-        return {"success": False, "error": "LinkedIn token missing"}
+    global _last_request_finished_at
+    if not has_linkedin_auth():
+        return {"success": False, "error": "LinkedIn auth missing"}
     if "linkedin.com/company" not in company_url:
         return {"success": False, "error": "Not a valid LinkedIn company URL"}
 
     with _lock:
-        browser = None
+        close_target = None
         normalized_company_url = normalize_linkedin_company_url(company_url)
         company_name = company_name_hint.strip() or derive_company_name(normalized_company_url)
         try:
             deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+            enforce_request_spacing(deadline)
             with sync_playwright() as playwright:
-                browser, ctx = setup_browser(playwright, token)
+                close_target, ctx = setup_browser(playwright, token)
                 page = ctx.new_page()
 
-                log.info("Opening company page: %s", normalized_company_url)
+                log.info("Opening company page: %s", mask_url(normalized_company_url))
                 try:
                     normalized_company_url = goto_with_retries(
                         page,
@@ -1048,7 +1436,7 @@ def find_and_message_company(company_url: str, message: str, token: str, company
                 except Exception:
                     pass
 
-                log.info("Company resolved: %s", company_name)
+                log.info("Company resolved: %s", mask_company_name(company_name))
 
                 result, info = send_via_company_page(page, message, deadline)
                 if result:
@@ -1081,15 +1469,16 @@ def find_and_message_company(company_url: str, message: str, token: str, company
                 }
 
         except TimeoutError as exc:
-            log.warning("Message attempt timed out: %s", exc)
+            log.warning("Message attempt timed out: %s", sanitize_error_text(exc))
             return {"success": False, "company": company_name, "error": str(exc)}
         except Exception as exc:
-            log.error("Message attempt failed: %s", exc)
+            log.error("Message attempt failed: %s", sanitize_error_text(exc))
             return {"success": False, "company": company_name, "error": str(exc)}
         finally:
-            if browser:
+            _last_request_finished_at = time.monotonic()
+            if close_target:
                 try:
-                    browser.close()
+                    close_target.close()
                 except Exception:
                     pass
 
@@ -1101,9 +1490,13 @@ def health():
             "status": "ok",
             "service": "linkedin-api",
             "token": bool(LINKEDIN_TOKEN),
+            "storage_state": has_storage_state(),
             "request_timeout_seconds": REQUEST_TIMEOUT_SECONDS,
             "navigation_timeout_ms": NAVIGATION_TIMEOUT_MS,
             "max_employee_candidates": MAX_EMPLOYEE_CANDIDATES,
+            "persistent_session": LINKEDIN_PERSISTENT_SESSION,
+            "profile_dir": LINKEDIN_USER_DATA_DIR if LINKEDIN_PERSISTENT_SESSION else "",
+            "storage_state_path": LINKEDIN_STORAGE_STATE_PATH,
         }
     )
 
@@ -1120,13 +1513,28 @@ def send_message():
         return jsonify({"success": False, "error": "linkedin_url is required"}), 400
     if not message:
         return jsonify({"success": False, "error": "message is required"}), 400
-    if not LINKEDIN_TOKEN:
-        return jsonify({"success": False, "error": "LINKEDIN_SESSION_TOKEN is missing"}), 500
+    if not has_linkedin_auth():
+        return jsonify({"success": False, "error": "LinkedIn auth is missing"}), 500
 
-    log.info("POST /send-message -> %s", linkedin_url)
+    log.info("POST /send-message -> %s", mask_url(linkedin_url))
     result = find_and_message_company(linkedin_url, message, LINKEDIN_TOKEN, company_name_hint=company_name)
     status = 200 if result.get("success") else 500
     return jsonify(result), status
+
+
+def build_batch_lead_context(lead, index):
+    return {
+        "source_index": lead.get("source_index", index),
+        "sirket": lead.get("sirket") or lead.get("company_name") or lead.get("Sirket") or "",
+        "skor": lead.get("skor", lead.get("score", lead.get("Skor", 0))),
+        "website": lead.get("website") or lead.get("Website") or "",
+        "linkedin_url": lead.get("linkedin_url") or lead.get("LinkedIn URL") or lead.get("URL") or "",
+        "lead_url": lead.get("lead_url") or lead.get("URL") or lead.get("website") or "",
+        "mesaj": lead.get("mesaj") or lead.get("message") or lead.get("Sales Script") or lead.get("gonderilecek_mesaj") or "",
+        "kaynak": lead.get("kaynak") or lead.get("Kaynak") or "",
+        "detayli_analiz": lead.get("detayli_analiz") or lead.get("analysis") or lead.get("Detaylı Analiz") or "",
+        "lead_type": lead.get("lead_type") or ("linkedin_ready" if (lead.get("linkedin_url") or lead.get("LinkedIn URL")) else "web_only"),
+    }
 
 
 @app.route("/send-batch", methods=["POST"])
@@ -1141,10 +1549,12 @@ def send_batch():
         url = lead.get("URL") or lead.get("linkedin_url") or lead.get("website") or ""
         msg = lead.get("Sales Script") or lead.get("message") or lead.get("gonderilecek_mesaj") or ""
         company_name = lead.get("company_name") or lead.get("sirket") or lead.get("Sirket") or ""
+        base_context = build_batch_lead_context(lead, i)
 
         if "linkedin.com/company" not in url:
             results.append(
                 {
+                    **base_context,
                     "company": company_name or lead.get("Sirket", "?"),
                     "success": False,
                     "error": "Not a LinkedIn company URL",
@@ -1152,9 +1562,9 @@ def send_batch():
             )
             continue
 
-        log.info("Batch [%s/%s]: %s", i + 1, len(leads), url)
+        log.info("Batch [%s/%s]: %s", i + 1, len(leads), mask_url(url))
         result = find_and_message_company(url, msg, LINKEDIN_TOKEN, company_name_hint=company_name)
-        results.append(result)
+        results.append({**base_context, **result})
 
         if i < len(leads) - 1:
             wait = random.uniform(4, 8)

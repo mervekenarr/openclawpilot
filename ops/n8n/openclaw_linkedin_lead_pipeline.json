@@ -78,7 +78,7 @@
       ],
       "parameters": {
         "method": "POST",
-        "url": "http://openclaw_sales_bot:8502/send-message",
+        "url": "http://host.docker.internal:8502/send-message",
         "authentication": "none",
         "sendHeaders": true,
         "specifyHeaders": "keypair",
