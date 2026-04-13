@@ -9,3 +9,4 @@ beautifulsoup4
 pandas
 openpyxl
 xlsxwriter
+linkedin-api

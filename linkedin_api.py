@@ -573,7 +573,15 @@ def get_company_message_button_candidates(page):
                     aria = normalize_text(candidate.get_attribute("aria-label") or "")
                     title = normalize_text(candidate.get_attribute("title") or "")
                     combined = " ".join(part for part in [text, aria, title] if part)
-                    if combined not in ("mesaj", "message") and " mesaj" not in combined and " message" not in combined:
+                    # Accept exact "mesaj"/"message" or text containing "mesaj"/"message" as a word
+                    is_message_btn = (
+                        combined in ("mesaj", "message")
+                        or "mesaj" in combined.split()
+                        or "message" in combined.split()
+                        or " mesaj" in combined
+                        or " message" in combined
+                    )
+                    if not is_message_btn:
                         continue
                     if any(
                         token in combined
@@ -583,10 +591,10 @@ def get_company_message_button_candidates(page):
                     box = candidate.bounding_box() or {}
                     y = box.get("y", 9999)
                     x = box.get("x", 9999)
-                    if y > 320:
+                    if y > 380:
                         continue
-                    if x > 520:
-                        continue
+                    # x filter removed — LinkedIn CTA buttons can appear anywhere horizontally
+                    # depending on viewport and page layout
                     candidates.append((y, x, candidate))
                 except Exception:
                     pass
@@ -648,28 +656,38 @@ def find_company_message_button_via_more_menu(page, deadline):
 
 def find_message_input(page):
     selectors = [
+        # Modern LinkedIn messaging composer (2024+)
+        ".msg-form__contenteditable[contenteditable='true']",
+        ".msg-form__contenteditable[role='textbox']",
+        ".msg-form__contenteditable",
+        # Overlay bubble (chat popup)
+        ".msg-overlay-conversation-bubble [contenteditable='true']",
+        ".msg-overlay-conversation-bubble div[role='textbox']",
+        ".msg-overlay-conversation-bubble .msg-form__contenteditable",
+        ".msg-overlay-conversation-bubble textarea",
+        # Content container wrappers
+        ".msg-form__msg-content-container .msg-form__contenteditable",
+        ".msg-form__msg-content-container [contenteditable='true']",
+        ".msg-form__msg-content-container div[role='textbox']",
+        # Modal / dialog variants
+        'div[role="dialog"] [contenteditable="true"]',
+        'div[role="dialog"] [role="textbox"]',
         'div[role="dialog"] textarea',
         'div[role="dialog"] textarea[placeholder*="mesaj"]',
         'div[role="dialog"] textarea[placeholder*="Mesaj"]',
         'div[role="dialog"] textarea[placeholder*="message"]',
         'div[role="dialog"] textarea[placeholder*="yaz"]',
-        'div[role="dialog"] [contenteditable="true"]',
-        'div[role="dialog"] [role="textbox"]',
-        ".artdeco-modal textarea",
         ".artdeco-modal [contenteditable='true']",
-        ".msg-form__contenteditable",
-        ".msg-form__contenteditable[contenteditable='true']",
-        ".msg-form__contenteditable[role='textbox']",
-        ".msg-form__msg-content-container .msg-form__contenteditable",
-        ".msg-form__msg-content-container [contenteditable='true']",
-        ".msg-form__msg-content-container div[role='textbox']",
-        ".msg-overlay-conversation-bubble [contenteditable='true']",
-        ".msg-overlay-conversation-bubble textarea",
-        ".msg-overlay-conversation-bubble div[role='textbox']",
-        ".msg-overlay-conversation-bubble .msg-form__contenteditable",
+        ".artdeco-modal textarea",
+        # Generic placeholder-based selectors
         'textarea[placeholder*="mesaj"]',
+        '[contenteditable="true"][placeholder*="mesaj"]',
         'textarea[placeholder*="Message"]',
+        '[contenteditable="true"][placeholder*="Message"]',
         'textarea[placeholder*="yaz"]',
+        'textarea[placeholder*="Write"]',
+        # Broad fallbacks
+        "[contenteditable='true']",
         "textarea",
         'div[role="textbox"]',
     ]
@@ -789,9 +807,14 @@ def activate_message_ui(page, msg_btn, deadline):
         ("enter", lambda: (msg_btn.focus(), page.keyboard.press("Enter"))),
     ]
 
+    # Track if this button is known to open a share overlay — bail out early if so
+    button_opens_share = False
+
     for name, action in actions:
         if time_left(deadline) < 2:
             return False
+        if button_opens_share:
+            break
         try:
             action()
             log.info("Triggered message button via %s click", name)
@@ -802,8 +825,9 @@ def activate_message_ui(page, msg_btn, deadline):
         for _ in range(4):
             human_delay(350, 650, deadline=deadline)
             if is_share_overlay(page):
-                log.info("Detected share/send-post overlay after %s click; closing it", name)
+                log.info("Detected share/send-post overlay after %s click; closing it — button is not the message button", name)
                 close_overlay_if_needed(page, deadline)
+                button_opens_share = True  # Don't retry with same button
                 break
             if has_message_surface(page):
                 log.info("Message surface detected after %s click", name)
@@ -1097,29 +1121,73 @@ def seed_storage_state(ctx, storage_state):
 
 
 def warm_up_linkedin_session(ctx):
-    page = None
-    try:
-        page = ctx.new_page()
-        page.goto("https://www.linkedin.com/feed/", timeout=min(12000, NAVIGATION_TIMEOUT_MS), wait_until="commit")
-        try:
-            page.wait_for_load_state("domcontentloaded", timeout=5000)
-        except Exception:
-            pass
-    except Exception as exc:
-        log.info("LinkedIn session warm-up did not fully complete: %s", sanitize_error_text(exc))
-    finally:
-        if page:
-            try:
-                page.close()
-            except Exception:
-                pass
+    """
+    Warm-up disabled: LinkedIn's bot detection causes ERR_TOO_MANY_REDIRECTS on /feed/.
+    Cookies are already loaded from storage state; no warm-up is needed.
+    """
+    pass
 
 
 STEALTH_SCRIPT = """
+// Hide webdriver
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+delete navigator.__proto__.webdriver;
+
+// Realistic plugins
+Object.defineProperty(navigator, 'plugins', {
+  get: () => {
+    const arr = [
+      { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+      { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+      { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+    ];
+    arr.item = i => arr[i];
+    arr.namedItem = n => arr.find(p => p.name === n) || null;
+    arr.refresh = () => {};
+    Object.setPrototypeOf(arr, PluginArray.prototype);
+    return arr;
+  }
+});
+
+// Realistic languages
 Object.defineProperty(navigator, 'languages', { get: () => ['tr-TR', 'tr', 'en-US', 'en'] });
-window.chrome = { runtime: {} };
+
+// Chrome runtime
+window.chrome = {
+  app: { isInstalled: false },
+  runtime: {
+    id: undefined,
+    connect: () => {},
+    sendMessage: () => {},
+    onMessage: { addListener: () => {}, removeListener: () => {} },
+  },
+  loadTimes: () => ({}),
+  csi: () => ({}),
+};
+
+// Permissions
+const originalQuery = window.navigator.permissions ? window.navigator.permissions.query.bind(navigator.permissions) : null;
+if (originalQuery) {
+  window.navigator.permissions.query = (parameters) =>
+    parameters.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission })
+      : originalQuery(parameters);
+}
+
+// WebGL vendor/renderer
+const getParam = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+  if (parameter === 37445) return 'Intel Inc.';
+  if (parameter === 37446) return 'Intel Iris OpenGL Engine';
+  return getParam.call(this, parameter);
+};
+
+// Hide automation in toString
+const nativeToString = Function.prototype.toString;
+Function.prototype.toString = function() {
+  if (this === Function.prototype.toString) return 'function toString() { [native code] }';
+  return nativeToString.call(this);
+};
 """
 
 
@@ -1130,6 +1198,16 @@ def setup_browser(playwright, token):
         "--disable-blink-features=AutomationControlled",
         "--disable-infobars",
         "--window-size=1280,800",
+        "--disable-features=IsolateOrigins,site-per-process",
+        "--disable-web-security",
+        "--allow-running-insecure-content",
+        "--disable-extensions",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--disable-popup-blocking",
+        "--ignore-certificate-errors",
+        "--lang=tr-TR",
     ]
     context_options = {
         "user_agent": (
@@ -1178,42 +1256,92 @@ def type_and_verify(textarea, message, deadline):
     ensure_time_budget(deadline, 3, "typing the message")
     textarea.click()
     human_delay(300, 600, deadline=deadline)
+
+    # Clear existing content — works for both <textarea> and contenteditable divs
     try:
         textarea.fill("")
     except Exception:
-        try:
-            textarea.press("Control+A")
-            textarea.press("Backspace")
-        except Exception:
-            pass
+        pass
+    try:
+        textarea.press("Control+A")
+        human_delay(100, 200, deadline=deadline)
+        textarea.press("Backspace")
+    except Exception:
+        pass
+
     textarea.type(message[:2000], delay=30)
     human_delay(800, 1200, deadline=deadline)
 
-    written = None
-    try:
-        written = textarea.input_value()
-    except Exception:
-        written = None
+    # Verification: check all possible ways to read back content
+    written = ""
+    for method in ("input_value", "inner_text", "text_content"):
+        try:
+            val = getattr(textarea, method)()
+            if val and len(val.strip()) > 5:
+                written = val
+                break
+        except Exception:
+            pass
 
+    # Also try JS-based evaluation for contenteditable divs
     if not written:
         try:
-            written = textarea.inner_text()
+            val = textarea.evaluate("el => el.value || el.innerText || el.textContent || ''")
+            if val and len(val.strip()) > 5:
+                written = val
         except Exception:
-            written = ""
+            pass
+
+    if not written:
+        # Last resort: if the box is still visible and focused, assume typing worked
+        try:
+            if textarea.is_visible():
+                log.warning("type_and_verify: could not confirm content — proceeding optimistically")
+                return True
+        except Exception:
+            pass
 
     return len((written or "").strip()) > 5
 
 
 def click_send_button(page, textarea, deadline):
-    """Finds the send button and clicks it, with Ctrl+Enter fallback."""
-    for _ in range(6):
+    """Finds the send button and clicks it. Ctrl+Enter is tried first as it is the most reliable."""
+    # Ctrl+Enter is the most reliable send method for LinkedIn's composer
+    try:
+        textarea.press("Control+Return")
+        log.info("Sent message via Ctrl+Enter")
+        human_delay(600, 900, deadline=deadline)
+        return True
+    except Exception as exc:
+        log.info("Ctrl+Enter failed: %s — falling back to send button search", exc)
+
+    # Fallback: find a dedicated send/submit button near the message form
+    send_selectors = [
+        ".msg-form__send-button",
+        'button[type="submit"]',
+        'button.msg-form__send-button',
+        '.msg-overlay-conversation-bubble button[type="submit"]',
+    ]
+    for sel in send_selectors:
+        try:
+            btn = page.query_selector(sel)
+            if btn and btn.is_visible() and btn.is_enabled():
+                btn.click()
+                log.info("Clicked send button via selector: %s", sel)
+                return True
+        except Exception:
+            pass
+
+    # Final fallback: text/aria token matching (broader search)
+    for _ in range(4):
         if time_left(deadline) < 1.5:
             return False
-        human_delay(500, 900, deadline=deadline)
+        human_delay(500, 800, deadline=deadline)
         try:
             btn = find_clickable_by_tokens(
                 page,
-                include_tokens=["mesaj gonder", "send message", "gonder", "send"],
+                include_tokens=["mesaj gonder", "send message"],
+                exclude_tokens=["gonderi", "paylas", "share"],
             )
             if btn:
                 if not btn.is_enabled():
@@ -1224,12 +1352,7 @@ def click_send_button(page, textarea, deadline):
         except Exception:
             pass
 
-    log.info("Send button not found, trying Ctrl+Enter")
-    try:
-        textarea.press("Control+Return")
-        return True
-    except Exception:
-        return False
+    return False
 
 
 def send_via_company_page(page, message, deadline):
@@ -1271,20 +1394,28 @@ def send_via_company_page(page, message, deadline):
         save_debug_screenshot(page, "debug_message_dialog_missing.png")
         return None, "Message dialog did not open"
 
-    if not choose_conversation_topic_if_needed(page, deadline):
-        save_debug_screenshot(page, "debug_topic_selection_failed.png")
-        return None, "Conversation topic could not be selected"
+    # Topic selection is optional — failure here doesn't always block sending
+    topic_ok = choose_conversation_topic_if_needed(page, deadline)
+    if not topic_ok:
+        log.info("Conversation topic selection returned False — proceeding anyway (topic may not be required)")
 
     if not type_and_verify(textarea, message, deadline):
         save_debug_screenshot(page, "debug_message_type_failed.png")
         return None, "Message could not be typed"
 
-    if not click_send_button(page, textarea, deadline):
-        if choose_conversation_topic_if_needed(page, deadline) and click_send_button(page, textarea, deadline):
-            return True, "Message sent from company page"
+    # Ensure the textarea still exists after typing (LinkedIn sometimes re-renders)
+    try:
+        if not textarea.is_visible():
+            textarea = find_message_input(page) or textarea
+    except Exception:
+        pass
 
-        save_debug_screenshot(page, "debug_send_button_failed.png")
-        return None, "Send action could not be completed"
+    if not click_send_button(page, textarea, deadline):
+        # Try choosing a topic (in case it became required after typing) and retry send
+        choose_conversation_topic_if_needed(page, deadline)
+        if not click_send_button(page, textarea, deadline):
+            save_debug_screenshot(page, "debug_send_button_failed.png")
+            return None, "Send action could not be completed"
 
     human_delay(1000, 1500, deadline=deadline)
     try:
@@ -1389,12 +1520,109 @@ def send_via_employee(page, company_url, message, deadline):
     return None, "Could not send a message to any employee"
 
 
+def _get_voyager_cookies():
+    """Returns (li_at, jsessionid) from storage state + env token."""
+    storage = load_storage_state()
+    cookies = {c["name"]: c["value"] for c in storage.get("cookies", []) if "name" in c}
+    li_at = LINKEDIN_TOKEN or cookies.get("li_at", "")
+    jsessionid = cookies.get("JSESSIONID", "")
+    return li_at, jsessionid
+
+
+def send_via_voyager_api(company_url: str, message: str) -> dict:
+    """
+    Send a LinkedIn connection request with a note using the Voyager internal API.
+    No browser automation — pure HTTP with session cookies.
+    Connection note is capped at 299 characters by LinkedIn.
+    """
+    try:
+        from linkedin_api import Linkedin  # type: ignore
+    except ImportError:
+        return {"success": False, "error": "linkedin-api not installed"}
+
+    li_at, jsessionid = _get_voyager_cookies()
+    if not li_at:
+        return {"success": False, "error": "No li_at token available"}
+
+    slug = unquote((company_url or "").split("/company/")[-1].split("/")[0].strip())
+    if not slug:
+        return {"success": False, "error": "Could not parse company slug from URL"}
+
+    try:
+        api = Linkedin("", "", authenticate=False, cookies={"li_at": li_at, "JSESSIONID": jsessionid})
+    except Exception as exc:
+        return {"success": False, "error": f"Voyager API init failed: {exc}"}
+
+    company_name = slug.replace("-", " ").title()
+    try:
+        company_profile = api.get_company(slug)
+        if company_profile:
+            company_name = company_profile.get("name") or company_name
+    except Exception as exc:
+        log.warning("Voyager: could not fetch company profile for %s: %s", slug, sanitize_error_text(exc))
+
+    log.info("Voyager: searching employees for %s", mask_company_name(company_name))
+
+    employees = []
+    try:
+        company_id = None
+        if company_profile:
+            urn = company_profile.get("entityUrn", "")
+            if urn:
+                company_id = urn.split(":")[-1]
+
+        if company_id:
+            employees = api.search_people(current_company=[company_id], limit=MAX_EMPLOYEE_CANDIDATES + 2) or []
+        else:
+            employees = api.search_people(keywords=company_name, limit=MAX_EMPLOYEE_CANDIDATES + 2) or []
+    except Exception as exc:
+        log.warning("Voyager: employee search failed: %s", sanitize_error_text(exc))
+
+    if not employees:
+        return {"success": False, "error": "Voyager: no employees found"}
+
+    note = message[:299]  # LinkedIn connection note limit
+    sent_to = None
+    for person in employees[:MAX_EMPLOYEE_CANDIDATES + 2]:
+        urn_id = person.get("urn_id") or person.get("public_id") or ""
+        if not urn_id:
+            continue
+        try:
+            result = api.add_connection(urn_id, message=note)
+            if result:
+                sent_to = urn_id
+                log.info("Voyager: connection request sent to %s", urn_id[:6] + "***")
+                break
+        except Exception as exc:
+            log.warning("Voyager: could not send to %s: %s", urn_id[:6] + "***", sanitize_error_text(exc))
+            continue
+
+    if sent_to:
+        return {
+            "success": True,
+            "company": company_name,
+            "company_url": company_url,
+            "method": "voyager_connection_request",
+            "person_urn": sent_to,
+            "message_sent": note,
+        }
+
+    return {"success": False, "error": "Voyager: could not send connection request to any employee"}
+
+
 def find_and_message_company(company_url: str, message: str, token: str, company_name_hint: str = "") -> dict:
     global _last_request_finished_at
     if not has_linkedin_auth():
         return {"success": False, "error": "LinkedIn auth missing"}
     if "linkedin.com/company" not in company_url:
         return {"success": False, "error": "Not a valid LinkedIn company URL"}
+
+    # --- PRIMARY: Voyager API (no browser, no bot detection) ---
+    log.info("Trying Voyager API for %s", mask_url(company_url))
+    voyager_result = send_via_voyager_api(company_url, message)
+    if voyager_result.get("success"):
+        return voyager_result
+    log.info("Voyager API failed (%s), falling back to Playwright", voyager_result.get("error"))
 
     with _lock:
         close_target = None

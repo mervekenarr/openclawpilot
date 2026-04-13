@@ -7,6 +7,7 @@ import re
 from engine import BLOCKED_HOST_TOKENS, openclaw_discover_companies, read_website_content
 import pandas as pd
 import io
+from urllib.parse import urlsplit, urlunsplit
 
 # Ayar Dosyası Yolu
 ENV_PATH = ".env"
@@ -58,6 +59,48 @@ def save_secure_setting(key, value):
         
     with open(ENV_PATH, "w", encoding="utf-8") as f:
         f.writelines(new_lines)
+
+
+def replace_url_host(url, new_host):
+    parsed = urlsplit((url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return url
+
+    auth = ""
+    if parsed.username:
+        auth = parsed.username
+        if parsed.password:
+            auth += f":{parsed.password}"
+        auth += "@"
+
+    port = f":{parsed.port}" if parsed.port else ""
+    return urlunsplit((parsed.scheme, f"{auth}{new_host}{port}", parsed.path, parsed.query, parsed.fragment))
+
+
+def build_n8n_webhook_candidates(webhook_url):
+    raw_url = (webhook_url or "").strip()
+    if not raw_url:
+        return []
+
+    candidates = [raw_url]
+    host = (urlsplit(raw_url).hostname or "").lower()
+
+    if host == "n8n":
+        for alias in ["localhost", "127.0.0.1"]:
+            candidate = replace_url_host(raw_url, alias)
+            if candidate not in candidates:
+                candidates.append(candidate)
+    elif host in {"localhost", "127.0.0.1"}:
+        candidate = replace_url_host(raw_url, "n8n")
+        if candidate not in candidates:
+            candidates.append(candidate)
+
+    return candidates
+
+
+def shorten_response_text(response, limit=220):
+    text = (response.text or "").strip().replace("\r", " ").replace("\n", " ")
+    return text[:limit] + ("..." if len(text) > limit else "")
 
 settings = load_secure_settings()
 
@@ -394,6 +437,43 @@ def send_to_n8n(data):
 
 # --- GÜVENLİ OTURUM (ARKA PLAN) ---
 # Token artık kullanıcıdan istenmiyor, doğrudan arka plandan okunuyor.
+def send_to_n8n_with_fallback(data):
+    webhook_url = settings.get("N8N_WEBHOOK_URL")
+    if not webhook_url:
+        return False, "N8N_WEBHOOK_URL ayarlanmamis."
+
+    candidate_urls = build_n8n_webhook_candidates(webhook_url)
+    connection_errors = []
+
+    for candidate_url in candidate_urls:
+        try:
+            response = requests.post(candidate_url, json=data, timeout=12)
+        except requests.RequestException as exc:
+            connection_errors.append(f"{candidate_url} -> {exc}")
+            continue
+
+        if response.status_code in [200, 201, 202]:
+            if candidate_url != webhook_url:
+                settings["N8N_WEBHOOK_URL"] = candidate_url
+                save_secure_setting("N8N_WEBHOOK_URL", candidate_url)
+            return True, f"Basariyla gonderildi ({candidate_url})."
+
+        response_hint = shorten_response_text(response)
+        if response.status_code == 404:
+            return (
+                False,
+                f"Webhook bulunamadi ({candidate_url}). Workflow aktif mi ve webhook path dogru mu? "
+                f"HTTP 404 {response_hint}",
+            )
+        return False, f"n8n yanit verdi ama istegi kabul etmedi ({candidate_url}). HTTP {response.status_code} {response_hint}"
+
+    tried_urls = ", ".join(candidate_urls)
+    last_error = connection_errors[-1] if connection_errors else "Bilinmeyen baglanti hatasi"
+    return False, f"n8n'e ulasilamadi. Denenen adresler: {tried_urls}. Son hata: {last_error}"
+
+
+send_to_n8n = send_to_n8n_with_fallback
+
 session_token = settings.get("LINKEDIN_SESSION_TOKEN", "")
 
 # --- SİDEBAR DÜZENİ ---
