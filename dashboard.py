@@ -262,7 +262,7 @@ def call_llm_raw(messages, timeout=60):
         "model": settings.get("OLLAMA_MODEL", "qwen2.5:14b"),
         "messages": messages,
         "stream": False,
-        "options": {"num_ctx": 4096, "temperature": 0.2, "num_predict": 1500}
+        "options": {"num_ctx": 8192, "temperature": 0.3, "num_predict": 2500}
     }
     last_error = None
     for attempt in range(2):
@@ -375,51 +375,76 @@ def generate_fallback_sales_script(company_name, product, sector, city, country)
     )
 
 
-def analyze_company(company_name, product, sector, city, country, company_context):
+def analyze_company(company_name, product, sector, city, country, company_context, website_url="", linkedin_url=""):
     system_prompt = {
         "role": "system",
         "content": (
-            "Sen kidemli bir is analistisin. Verilen kaynaklara dayanarak sirketin faaliyetlerini ozetle, "
-            "uygunluk puani ver ve LinkedIn icin kisa ama profesyonel bir satis mesaji hazirla. "
-            "Yanit formati yalnizca JSON olsun: "
-            "{\"score\": 9, \"analysis\": \"...\", \"sales_script\": \"...\"}"
+            "Sen kıdemli bir B2B iş geliştirme analistisin. "
+            "Verilen firma bilgileri ve web içeriğine dayanarak aşağıdaki JSON formatında yanıt üret. "
+            "JSON dışında hiçbir şey yazma.\n\n"
+            "Format:\n"
+            "{\n"
+            '  "score": <1-10 tam sayı>,\n'
+            '  "location_match": <true/false — firma hedef şehirde mi?>,\n'
+            '  "company_type": "<üretici/distribütör/hizmet/perakende/diğer>",\n'
+            '  "key_activities": "<firmanın ana faaliyet alanları, 1-2 cümle>",\n'
+            '  "pain_points": "<bu firmanın muhtemelen ihtiyaç duyduğu şeyler, 1-2 cümle>",\n'
+            '  "analysis": "<kapsamlı faaliyet raporu — şehir uyumu, sektör uyumu, ürün uyumu değerlendir, en az 4 cümle>",\n'
+            '  "sales_script": "<LinkedIn mesajı — kişisel, samimi, 3-4 cümle, emoji yok, satışçı havası yok>"\n'
+            "}\n\n"
+            "SKORLAMA KRİTERLERİ:\n"
+            "10: Hedef şehirde, hedef sektörde, ürüne açık bir ihtiyacı var\n"
+            "7-9: Şehir/sektör uyumu var ama ürün bağlantısı dolaylı\n"
+            "4-6: Kısmi uyum, belirsizlik var\n"
+            "2-3: Yanlış şehir VEYA yanlış sektör\n"
+            "1: Hem şehir hem sektör uyumsuz\n\n"
+            "Sales script için: Firma adını, sektörünü ve ürünü bağdaştır. "
+            "'Değerli yönetici' gibi genel ifadeler kullanma. Direkt ve özlü ol."
         ),
     }
+
+    url_context = ""
+    if website_url:
+        url_context += f"Website: {website_url}\n"
+    if linkedin_url:
+        url_context += f"LinkedIn: {linkedin_url}\n"
+
     user_prompt = (
-        f"Firma: {company_name}\n"
-        f"Urun: {product}\n"
-        f"Sektor: {sector}\n"
-        f"Lokasyon: {city}/{country}\n\n"
-        f"Kaynak icerigi:\n{company_context}"
+        f"Firma adı: {company_name}\n"
+        f"{url_context}"
+        "Kritik kural: Kaynaklarda hedef urun/hizmet acikca gecmiyorsa score en fazla 3 olmali.\n"
+        f"Hedef ürün/hizmet: {product}\n"
+        f"Hedef sektör: {sector}\n"
+        f"Hedef şehir: {city}, {country}\n\n"
+        f"Kaynak içeriği:\n{company_context[:3000]}"
     )
 
-    attempts = [
-        [system_prompt, {"role": "user", "content": user_prompt}],
-        [
-            system_prompt,
-            {
-                "role": "user",
-                "content": user_prompt
-                + "\n\nJSON disinda hicbir sey yazma. Analysis alani en az 3 cumle, sales_script alani en az 2 cumle olsun.",
-            },
-        ],
-    ]
-
-    last_info = ""
-    for messages in attempts:
-        raw, info = call_llm_raw(messages, timeout=75)
-        last_info = info
+    for extra in ["", "\n\nJSON dışında hiçbir şey yazma. Tüm alanları doldur."]:
+        raw, info = call_llm_raw(
+            [system_prompt, {"role": "user", "content": user_prompt + extra}],
+            timeout=90,
+        )
         score, analysis, script = parse_analysis_response(raw)
         if has_meaningful_content(analysis) and has_meaningful_content(script):
+            # Extract extra fields if present
+            try:
+                match = re.search(r'\{.*\}', raw, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                    location_match = parsed.get("location_match", True)
+                    if not location_match:
+                        score = min(score, 3)
+            except Exception:
+                pass
             return score, analysis, script, info
 
     fallback_analysis = (
-        f"{company_name} icin otomatik derin analiz tamamlanamadi ancak bulunan kaynaklar, "
-        f"firmanin {sector} alaninda {product} ile iliskili bir faaliyet gosterdigini isaret ediyor. "
-        "Kesin faaliyet kapsaminin teyidi icin firma sayfasi veya LinkedIn profili manuel olarak gozden gecirilebilir."
+        f"{company_name} için otomatik derin analiz tamamlanamadı, ancak bulunan kaynaklar "
+        f"firmanın {sector} alanında {product} ile ilişkili faaliyet gösterdiğine işaret ediyor. "
+        "Kesin faaliyet kapsamı için firma sayfası veya LinkedIn profili manuel olarak gözden geçirilmelidir."
     )
     fallback_script = generate_fallback_sales_script(company_name, product, sector, city, country)
-    return 5, fallback_analysis, fallback_script, last_info or "LLM fallback"
+    return 5, fallback_analysis, fallback_script, "LLM fallback"
 
 def send_to_n8n(data):
     """Bulunan adayları n8n webhook'una gönderir."""
@@ -568,8 +593,11 @@ else:
             url = linkedin_url or website_url
             name = item.get("company_name", "Bilinmeyen")
             is_li = item.get("is_linkedin", False)
+            is_openclaw = item.get("is_openclaw", False)
             label = "🟦 LinkedIn" if is_li else "🌐 Web"
-            if not is_li and linkedin_url:
+            if is_openclaw:
+                label = "OpenClaw + LinkedIn" if linkedin_url else "OpenClaw + Web"
+            if not is_openclaw and not is_li and linkedin_url:
                 label = "Web + LinkedIn"
             col_a, col_b = st.columns([3, 1])
             col_a.markdown(f"**{name}** — {label}")
@@ -585,10 +613,8 @@ else:
         analysis_area = st.container()
 
 
-        system_prompt = {"role": "system", "content": "Sen kıdemli bir iş analistisin. Şirketleri LOKASYON ve TÜR UYUMUNA göre denetle. 'analysis' kısmına bu firmanın tam olarak NE YAPTIĞINI detaylıca raporla. 'sales_script' kısmına ise bu firmaya özel, LinkedIn üzerinden gönderilecek etkileyici bir satış mesajı hazırla. Format: `{\"score\": 9, \"analysis\": \"...\", \"sales_script\": \"...\"}`"}
-
         # 5 ADAY ANALİZİ — her firma için bağımsız LLM çağrısı
-        for i, comp in enumerate(found_set[:5]): 
+        for i, comp in enumerate(found_set[:5]):
             with analysis_area:
                 with st.expander(f"📌 Analiz ve Teklif: {comp}", expanded=True):
                     # 1. Siteyi bul ve içeriği al
@@ -606,47 +632,20 @@ else:
                             company_item,
                             session_token,
                         )
-                        read_res = company_context
                         s.update(label=f"✅ {comp} incelendi", state="complete")
-                    
-                    # 2. AI'ya analiz ettir (her firma için bağımsız çağrı)
+
+                    # 2. AI'ya analiz ettir
                     with st.spinner("🤖 Derin analiz yapılıyor..."):
-                        prompt = f"Firma: {comp}\nÜrün: {product}, Sektör: {sector}, Lokasyon: {selected_city}/{selected_country}\n\nWeb sitesi içeriği:\n{read_res[:2500]}"
-                        messages = [system_prompt, {"role": "user", "content": prompt}]
-                        ai_ana, info = call_llm_raw(messages, timeout=60)
-                        
-                        # 3. ANALİZ KARTINI BAS (JSON TEMİZLEME)
-                        f_score = 5
-                        f_analysis = "Analiz yapılamadı."
-                        f_script = "Mesaj hazırlanamadı."
-
-                        try:
-                            if ai_ana:
-                                match = re.search(r'\{.*\}', ai_ana, re.DOTALL)
-                                if match:
-                                    ana_json = json.loads(match.group(0))
-                                    f_score = ana_json.get("score", 5)
-                                    f_analysis = ana_json.get("analysis", f_analysis)
-                                    f_script = ana_json.get("sales_script", f_script)
-                                else:
-                                    f_analysis = ai_ana if len(ai_ana) > 20 else f_analysis
-                        except:
-                            pass
-
-                        if not has_meaningful_content(f_analysis):
-                            f_analysis = (
-                                f"{comp} icin otomatik derin analiz tam dolmadi. "
-                                f"Bulunan kaynaklar firmanin {sector} alaninda {product} ile iliskili olabilecegini gosteriyor. "
-                                "Kesin faaliyet kapsami icin firma sayfasi veya LinkedIn profili manuel olarak teyit edilmelidir."
-                            )
-                        if not has_meaningful_content(f_script):
-                            f_script = generate_fallback_sales_script(
-                                comp,
-                                product,
-                                sector,
-                                selected_city,
-                                selected_country,
-                            )
+                        f_score, f_analysis, f_script, info = analyze_company(
+                            comp,
+                            product,
+                            sector,
+                            selected_city,
+                            selected_country,
+                            company_context,
+                            website_url=company_url,
+                            linkedin_url=linkedin_url,
+                        )
 
                         col1, col2, col3 = st.columns([1, 4, 1])
                         col1.metric("Uygunluk", f"{f_score}/10")

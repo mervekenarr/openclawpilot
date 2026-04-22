@@ -27,6 +27,8 @@ log = logging.getLogger("linkedin-api")
 app = Flask(__name__)
 
 LINKEDIN_TOKEN = os.getenv("LINKEDIN_SESSION_TOKEN", "")
+LINKEDIN_EMAIL = os.getenv("LINKEDIN_EMAIL", "").strip()
+LINKEDIN_PASSWORD = os.getenv("LINKEDIN_PASSWORD", "").strip()
 REQUEST_TIMEOUT_SECONDS = int(os.getenv("LINKEDIN_REQUEST_TIMEOUT", "85"))
 NAVIGATION_TIMEOUT_MS = int(os.getenv("LINKEDIN_NAV_TIMEOUT_MS", "20000"))
 MAX_EMPLOYEE_CANDIDATES = int(os.getenv("LINKEDIN_MAX_EMPLOYEE_CANDIDATES", "2"))
@@ -144,7 +146,64 @@ def has_storage_state():
 
 
 def has_linkedin_auth():
-    return bool(LINKEDIN_TOKEN) or has_storage_state()
+    return bool(LINKEDIN_TOKEN) or has_storage_state() or bool(LINKEDIN_EMAIL and LINKEDIN_PASSWORD)
+
+
+def auto_login_with_credentials(page, deadline):
+    """Logs into LinkedIn using LINKEDIN_EMAIL and LINKEDIN_PASSWORD env vars."""
+    if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
+        return False
+
+    log.info("Attempting auto-login with stored credentials")
+    try:
+        page.goto("https://www.linkedin.com/login", timeout=min(15000, int(time_left(deadline) * 1000) - 500), wait_until="domcontentloaded")
+        human_delay(800, 1400, deadline=deadline)
+
+        email_field = page.query_selector('#username')
+        if not email_field:
+            log.warning("Auto-login: email field not found")
+            return False
+        email_field.fill(LINKEDIN_EMAIL)
+        human_delay(400, 700, deadline=deadline)
+
+        pass_field = page.query_selector('#password')
+        if not pass_field:
+            log.warning("Auto-login: password field not found")
+            return False
+        pass_field.fill(LINKEDIN_PASSWORD)
+        human_delay(400, 700, deadline=deadline)
+
+        submit = page.query_selector('button[type="submit"]')
+        if submit:
+            submit.click()
+        else:
+            pass_field.press("Enter")
+
+        human_delay(2500, 3500, deadline=deadline)
+
+        current_url = (page.url or "").lower()
+        if "/feed" in current_url or "/mynetwork" in current_url or "/in/" in current_url:
+            log.info("Auto-login successful")
+            # Persist session so next startup skips login
+            storage_path = LINKEDIN_STORAGE_STATE_PATH
+            try:
+                os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+                page.context.storage_state(path=storage_path)
+                log.info("Session saved to %s", mask_url(storage_path))
+            except Exception as exc:
+                log.warning("Could not save session after auto-login: %s", sanitize_error_text(exc))
+            return True
+
+        if "/checkpoint/" in current_url or "challenge" in current_url:
+            log.warning("Auto-login: LinkedIn requires manual verification (captcha/2FA)")
+            return False
+
+        log.warning("Auto-login: unexpected redirect to %s", mask_url(current_url))
+        return False
+
+    except Exception as exc:
+        log.warning("Auto-login failed: %s", sanitize_error_text(exc))
+        return False
 
 
 def normalize_text(value):
@@ -1251,6 +1310,29 @@ def setup_browser(playwright, token):
     return close_target, ctx
 
 
+def ensure_linkedin_session(ctx, deadline):
+    """If there is no valid session cookie, attempts auto-login with credentials."""
+    try:
+        cookies = {c["name"]: c["value"] for c in ctx.cookies()}
+    except Exception:
+        cookies = {}
+
+    if cookies.get("li_at") or LINKEDIN_TOKEN:
+        return True
+
+    if not LINKEDIN_EMAIL or not LINKEDIN_PASSWORD:
+        return False
+
+    page = ctx.new_page()
+    try:
+        return auto_login_with_credentials(page, deadline)
+    finally:
+        try:
+            page.close()
+        except Exception:
+            pass
+
+
 def type_and_verify(textarea, message, deadline):
     """Types the message and verifies that LinkedIn captured the content."""
     ensure_time_budget(deadline, 3, "typing the message")
@@ -1633,6 +1715,7 @@ def find_and_message_company(company_url: str, message: str, token: str, company
             enforce_request_spacing(deadline)
             with sync_playwright() as playwright:
                 close_target, ctx = setup_browser(playwright, token)
+                ensure_linkedin_session(ctx, deadline)
                 page = ctx.new_page()
 
                 log.info("Opening company page: %s", mask_url(normalized_company_url))

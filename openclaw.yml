@@ -1,18 +1,47 @@
-runtimeHome: "/app/runtime-home"
-
-providers:
-  ollama:
-    baseUrl: "http://172.16.41.43:11434"
-    apiKey: "ollama-local"
-    api: "ollama"
-    models:
-      - id: "qwen2.5:14b"
-        name: "Qwen 2.5 14B"
-
-gateway:
-  mode: "local"
-  bind: "0.0.0.0"
-  pairing: false
-  auth:
-    mode: "token"
-    token: "demo-openclaw-token"
+{
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://172.16.49.5:11434",
+        "apiKey": "ollama-local",
+        "api": "ollama",
+        "models": [
+          {
+            "id": "gemma4:latest",
+            "name": "Gemma 4 Local",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 32768
+          },
+          {
+            "id": "qwen2.5:14b",
+            "name": "Qwen 2.5 14B",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 32768,
+            "maxTokens": 32768
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/gemma4:latest"
+      }
+    }
+  },
+  "gateway": {
+    "port": 18790,
+    "mode": "local",
+    "bind": "lan",
+    "auth": {
+      "mode": "token",
+      "token": "demo-openclaw-token"
+    }
+  }
+}

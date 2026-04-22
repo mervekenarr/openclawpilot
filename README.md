@@ -49,5 +49,29 @@ AnaliziBaslat.bat
 - **AI Model**: Ollama / Qwen 2.5 (3B / 7B / 14B destekler)
 - **Veri Okuma**: Trafilatura (Hızlı ve Temiz Metin Ekstraksiyonu)
 
+## OpenClaw Discovery
+
+Firma keşfi üç katmanlı çalışır:
+
+1. OpenClaw ajan/gateway keşfi: kaynak URL döndürürse ve ürün filtresinden geçerse kabul edilir.
+2. LinkedIn şirket araması: `.env` token veya kayıtlı Playwright oturumu varsa kullanılır.
+3. Web araması: resmi site bulunur, ürün kanıtı site/özet/içerikte doğrulanır.
+
+İlgili `.env` ayarları:
+
+```text
+OPENCLAW_DISCOVERY_ENABLED=true
+OPENCLAW_CLI_AGENT_ENABLED=true
+OPENCLAW_GATEWAY_URL=http://127.0.0.1:18789
+OPENCLAW_GATEWAY_TOKEN=demo-openclaw-token
+OPENCLAW_AGENT_TIMEOUT_SECONDS=90
+```
+
+Docker ile gateway de açılacaksa:
+
+```bash
+docker compose --profile openclaw up -d --force-recreate openclaw-gateway openclaw-sales-assistant
+```
+
 ---
 *OpenClaw Pilot Proje - Geleceğin Satış Otomasyonu Çözümleri*

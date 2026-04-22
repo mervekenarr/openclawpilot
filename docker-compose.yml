@@ -16,6 +16,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 256m
 
   n8n:
     image: n8nio/n8n:latest
@@ -35,6 +36,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 512m
 
   openclaw-sales-assistant:
     build: .
@@ -51,15 +53,61 @@ services:
       - LINKEDIN_USER_DATA_DIR=${LINKEDIN_USER_DATA_DIR:-/app/runtime-home/linkedin-profile}
       - LINKEDIN_DEBUG_SCREENSHOTS=${LINKEDIN_DEBUG_SCREENSHOTS:-false}
       - LINKEDIN_LOG_SENSITIVE_DATA=${LINKEDIN_LOG_SENSITIVE_DATA:-false}
-      - OPENCLAW_GATEWAY_URL=http://openclaw-gateway:18789
+      - OPENCLAW_GATEWAY_URL=http://openclaw-gateway:18790
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-demo-openclaw-token}
+      - OPENCLAW_DISCOVERY_ENABLED=${OPENCLAW_DISCOVERY_ENABLED:-true}
+      - OPENCLAW_AGENT_TIMEOUT_SECONDS=${OPENCLAW_AGENT_TIMEOUT_SECONDS:-90}
       - N8N_WEBHOOK_URL=http://n8n:5678/webhook/leads
     volumes:
       - .:/app
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    networks:
+      - default
+      - rakip_firma_medya
     restart: unless-stopped
     depends_on:
       - n8n
+    mem_limit: 1g
+
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-openclaw-local:2026.3.23-2}
+    container_name: openclawpilot_openclaw_gateway
+    profiles:
+      - openclaw
+    entrypoint: ["openclaw"]
+    command:
+      - gateway
+      - run
+      - --port
+      - "18790"
+      - --bind
+      - lan
+      - --auth
+      - token
+      - --token
+      - ${OPENCLAW_GATEWAY_TOKEN:-demo-openclaw-token}
+    ports:
+      - "18790:18790"
+    environment:
+      - OPENCLAW_CONFIG_PATH=/app/openclaw.yml
+      - OPENCLAW_STATE_DIR=/app/runtime-home/.openclaw
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:-demo-openclaw-token}
+      - OPENCLAW_TZ=${OPENCLAW_TZ:-Europe/Istanbul}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+    volumes:
+      - ./runtime-home:/app/runtime-home
+      - ./openclaw.yml:/app/openclaw.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - default
+    restart: unless-stopped
+
+networks:
+  rakip_firma_medya:
+    external: true
+    name: rakip_firma_medya_default
 
 volumes:
   postgres_data:
